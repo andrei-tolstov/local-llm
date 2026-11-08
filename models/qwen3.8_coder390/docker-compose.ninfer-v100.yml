@@ -1,0 +1,117 @@
+services:
+  coder390-ninfer-v100:
+    build:
+      context: .
+      dockerfile: Dockerfile.ninfer-v100
+    image: ninfer-v100:1.7.2
+    container_name: ${CONTAINER_NAME:-coder390-llama-server}
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "${HOST_BIND_IP:-0.0.0.0}:${CODER390_PORT:-8084}:8080"
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      - CODER390_MODEL_FILE=${CODER390_MODEL_FILE:-model_v100.ninfer}
+      - CODER390_ALIAS=${CODER390_ALIAS:-coder390-27b}
+      - CODER390_API_KEY=${CODER390_API_KEY:-}
+      # Рекомендованные параметры JimmyMax/ninfer-v100 для Qwen3.8-27B на Tesla V100 32GB
+      - CODER390_MAX_CONTEXT=${CODER390_MAX_CONTEXT:-200000}
+      - CODER390_KV_CAPACITY=${CODER390_KV_CAPACITY:-auto}
+      - CODER390_KV_DTYPE=${CODER390_KV_DTYPE:-int8}
+      - CODER390_PREFILL_CHUNK=${CODER390_PREFILL_CHUNK:-2048}
+      - CODER390_MAX_CONCURRENCY=${CODER390_MAX_CONCURRENCY:-1}
+      - CODER390_SPEC_BACKEND=${CODER390_SPEC_BACKEND:-mtp}
+      - CODER390_SPEC_DRAFT_TOKENS=${CODER390_SPEC_DRAFT_TOKENS:-4}
+      - CODER390_NGRAM_DRAFT_TOKENS=${CODER390_NGRAM_DRAFT_TOKENS:-0}
+      - CODER390_PRESERVE_THINKING=${CODER390_PRESERVE_THINKING:-true}
+      - CODER390_ENABLE_VISION=${CODER390_ENABLE_VISION:-true}
+      - CODER390_PENDING_TIMEOUT_MS=${CODER390_PENDING_TIMEOUT_MS:-1200000}
+      - CODER390_DEVICE_STATE_SLOTS=${CODER390_DEVICE_STATE_SLOTS:-}
+      - CODER390_HOST_STATE_SLOTS=${CODER390_HOST_STATE_SLOTS:-}
+      - CODER390_HOST_KV_MIB=${CODER390_HOST_KV_MIB:-}
+      - CODER390_EXTRA_ARGS=${CODER390_EXTRA_ARGS:-}
+    volumes:
+      - "${CODER390_MODELS_DIR:-/opt/models/coder390}:/workspace/models:ro"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "======================================================================"
+        echo " [JimmyMax/ninfer-v100] Запуск Qwen3.8 Coder390 на Tesla V100 (sm_70)"
+        echo "======================================================================"
+
+        SERVER_BIN="/usr/local/bin/ninfer-serve"
+        MODEL_PATH="/workspace/models/$${CODER390_MODEL_FILE}"
+
+        if [ ! -f "$$MODEL_PATH" ]; then
+          echo "ОШИБКА: Файл модели $$MODEL_PATH не найден!"
+          exit 1
+        fi
+
+        ARGS="$$MODEL_PATH --host 0.0.0.0 --port 8080"
+
+        if [ -n "$$CODER390_ALIAS" ]; then
+          ARGS="$$ARGS --model-id $$CODER390_ALIAS"
+        fi
+
+        if [ -n "$$CODER390_API_KEY" ]; then
+          ARGS="$$ARGS --api-key $$CODER390_API_KEY"
+        fi
+
+        ARGS="$$ARGS --max-context $${CODER390_MAX_CONTEXT:-200000}"
+        ARGS="$$ARGS --kv-capacity $${CODER390_KV_CAPACITY:-auto}"
+        ARGS="$$ARGS --kv-dtype $${CODER390_KV_DTYPE:-int8}"
+        ARGS="$$ARGS --prefill-chunk $${CODER390_PREFILL_CHUNK:-2048}"
+        ARGS="$$ARGS --max-concurrency $${CODER390_MAX_CONCURRENCY:-1}"
+        ARGS="$$ARGS --pending-timeout-ms $${CODER390_PENDING_TIMEOUT_MS:-1200000}"
+
+        if [ -n "$$CODER390_DEVICE_STATE_SLOTS" ]; then
+          ARGS="$$ARGS --device-state-slots $$CODER390_DEVICE_STATE_SLOTS"
+        fi
+
+        if [ -n "$$CODER390_HOST_STATE_SLOTS" ]; then
+          ARGS="$$ARGS --host-state-slots $$CODER390_HOST_STATE_SLOTS"
+        fi
+
+        if [ -n "$$CODER390_HOST_KV_MIB" ]; then
+          ARGS="$$ARGS --host-kv-mib $$CODER390_HOST_KV_MIB"
+        fi
+
+        if [ "$${CODER390_SPEC_BACKEND}" != "none" ]; then
+          ARGS="$$ARGS --spec $${CODER390_SPEC_BACKEND:-mtp} --draft-tokens $${CODER390_SPEC_DRAFT_TOKENS:-4} --lm-head-draft"
+          ARGS="$$ARGS --ngram-draft-tokens $${CODER390_NGRAM_DRAFT_TOKENS:-0}"
+        fi
+
+        if [ "$$CODER390_PRESERVE_THINKING" = "true" ]; then
+          ARGS="$$ARGS --preserve-thinking"
+        fi
+
+        if [ "$$CODER390_ENABLE_VISION" = "true" ]; then
+          ARGS="$$ARGS --vision"
+        fi
+
+        if [ -n "$$CODER390_EXTRA_ARGS" ]; then
+          ARGS="$$ARGS $$CODER390_EXTRA_ARGS"
+        fi
+
+        echo "Запуск: $$SERVER_BIN $$ARGS"
+        exec $$SERVER_BIN $$ARGS
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "${TARGET_GPU_UUID:-GPU-733ae7cc-c1bf-3352-42d5-ba2762470325}" ]
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || curl -sf http://localhost:8080/v1/models >/dev/null || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s

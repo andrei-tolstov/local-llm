@@ -20,14 +20,14 @@ services:
       - CODER390_ALIAS=${CODER390_ALIAS:-coder390-27b}
       - CODER390_API_KEY=${CODER390_API_KEY:-}
       # 262144 (256K — нативный потолок модели) с явным KV_CAPACITY для работы с Vision и MTP на V100 32GB
-      - CODER390_MAX_CONTEXT=${CODER390_MAX_CONTEXT:-262144}
-      - CODER390_KV_CAPACITY=${CODER390_KV_CAPACITY:-262144}
+      - CODER390_MAX_CONTEXT=${CODER390_MAX_CONTEXT:-260096}
+      - CODER390_KV_CAPACITY=${CODER390_KV_CAPACITY:-260096}
       - CODER390_MAX_CONCURRENCY=${CODER390_MAX_CONCURRENCY:-1}
       - CODER390_KV_DTYPE=${CODER390_KV_DTYPE:-int8}
       - CODER390_PREFILL_CHUNK=${CODER390_PREFILL_CHUNK:-2048}
-      - CODER390_DEVICE_STATE_SLOTS=${CODER390_DEVICE_STATE_SLOTS:-1}
+      - CODER390_DEVICE_STATE_SLOTS=${CODER390_DEVICE_STATE_SLOTS:-3}
       - CODER390_HOST_STATE_SLOTS=${CODER390_HOST_STATE_SLOTS:-8}
-      - CODER390_HOST_KV_MIB=${CODER390_HOST_KV_MIB:-8192}
+      - CODER390_HOST_KV_MIB=${CODER390_HOST_KV_MIB:-12288}
       # Таймаут ожидания очереди/подготовки запроса: 20 минут = 1200000 мс (дефолт ninfer: 30000)
       - CODER390_PENDING_TIMEOUT_MS=${CODER390_PENDING_TIMEOUT_MS:-1200000}
       - CODER390_SPEC_BACKEND=${CODER390_SPEC_BACKEND:-mtp}
@@ -75,14 +75,14 @@ services:
           ARGS="$$ARGS --api-key $$CODER390_API_KEY"
         fi
 
-        ARGS="$$ARGS --max-context $${CODER390_MAX_CONTEXT:-262144}"
-        ARGS="$$ARGS --kv-capacity $${CODER390_KV_CAPACITY:-262144}"
+        ARGS="$$ARGS --max-context $${CODER390_MAX_CONTEXT:-260096}"
+        ARGS="$$ARGS --kv-capacity $${CODER390_KV_CAPACITY:-260096}"
         ARGS="$$ARGS --max-concurrency $${CODER390_MAX_CONCURRENCY:-1}"
         ARGS="$$ARGS --kv-dtype $${CODER390_KV_DTYPE:-int8}"
         ARGS="$$ARGS --prefill-chunk $${CODER390_PREFILL_CHUNK:-2048}"
-        ARGS="$$ARGS --device-state-slots $${CODER390_DEVICE_STATE_SLOTS:-1}"
+        ARGS="$$ARGS --device-state-slots $${CODER390_DEVICE_STATE_SLOTS:-3}"
         ARGS="$$ARGS --host-state-slots $${CODER390_HOST_STATE_SLOTS:-8}"
-        ARGS="$$ARGS --host-kv-mib $${CODER390_HOST_KV_MIB:-8192}"
+        ARGS="$$ARGS --host-kv-mib $${CODER390_HOST_KV_MIB:-12288}"
         ARGS="$$ARGS --pending-timeout-ms $${CODER390_PENDING_TIMEOUT_MS:-1200000}"
 
         if [ "$${CODER390_SPEC_BACKEND}" != "none" ]; then
@@ -118,7 +118,7 @@ services:
               capabilities: [ gpu ]
     healthcheck:
       test: [ "CMD-SHELL", "curl -sf http://localhost:8080/v1/models >/dev/null || exit 1" ]
-      interval: 30s
-      timeout: 10s
+      interval: 15s
+      timeout: 5s
       retries: 3
-      start_period: 90s
+      start_period: 40s
