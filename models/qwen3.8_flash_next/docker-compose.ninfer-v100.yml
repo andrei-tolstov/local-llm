@@ -93,7 +93,7 @@ services:
         fi
 
         if [ "$${FLASH_NEXT_SPEC_BACKEND}" != "none" ]; then
-          ARGS="$$ARGS --spec $${FLASH_NEXT_SPEC_BACKEND:-mtp} --draft-tokens $${FLASH_NEXT_SPEC_DRAFT_TOKENS:-3} --lm-head-draft"
+          ARGS="$$ARGS --spec $${FLASH_NEXT_SPEC_BACKEND:-mtp} --draft-tokens $${FLASH_NEXT_SPEC_DRAFT_TOKENS:-3}"
           ARGS="$$ARGS --ngram-draft-tokens $${FLASH_NEXT_NGRAM_DRAFT_TOKENS:-0}"
         fi
 
