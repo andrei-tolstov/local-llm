@@ -23,18 +23,27 @@
   - [x] Закоммитить изменения и запушить в GitHub (`origin/master`) <!-- id: 20 -->
   - [x] Синхронизировать проект на удаленном сервере в `/opt/local-llm` <!-- id: 21 -->
 
+- [x] Оптимизация использования оперативной памяти (~25-28 Гб RAM под N-gram companion table, Вариант 3): <!-- id: 22 -->
+  - [x] Разработка плана расчетов RAM (`qwen38_flash_next_ram_optimization_plan.md`) <!-- id: 23 -->
+  - [x] Обновление конфигурации: `FLASH_NEXT_NGRAM_RESIDENCY=ram`, `FLASH_NEXT_NGRAM_LOCK=true`, `FLASH_NEXT_HOST_CACHE_MIB=0` <!-- id: 24 -->
+  - [x] Обновление `docker-compose.ninfer-v100.yml` и `docker-compose.yml` (проброс `--ngram-table`, `--ngram-residency ram`, `--ngram-lock`, `--host-cache-mib 0`) <!-- id: 25 -->
+  - [x] Запуск и верификация: контейнер заблокировал 27465 MiB (~26.8 GiB) физической RAM под n-gram таблицу (`MEM USAGE: 28GiB / 31.29GiB`, 89.5%) <!-- id: 26 -->
+  - [x] Успешное тестирование инференса через llama-swap:8090 и обратного переключения на coder390 <!-- id: 27 -->
+  - [x] Фиксация в git master и синхронизация на 192.168.50.38 (`80f0155`) <!-- id: 28 -->
+
 ## Результаты тестирования и верификации
 
 1. **Динамическое переключение через Llama-Swap**:
    - Запрос на роутер `http://192.168.50.38:8090/v1/chat/completions` с моделью `flash-next`:
      - `deepseek-llama-swap` корректно остановил `coder390-llama-server`.
      - Запустил `flash-next-llama-server`.
-     - Движок инициализировался, загрузил 4.57 GiB базовых весов, откалибровал SM70 и аллоцировал 18432 MiB кэша экспертов (~5600 слотов).
+     - Движок инициализировался: базовые веса 4.57 GiB, эксперты на NVMe со VRAM-кэшем 18432 MiB, n-gram companion table в RAM (27465 MiB, locked).
+     - Использование памяти контейнером: 28 GiB / 31.29 GiB (89.5% RAM), хост: available 1.9 GiB (без OOM).
      - Healthcheck на порту 8087 пройден успешно.
-     - Ответ сгенерирован со спекулятивным декодированием MTP (`draft_n_accepted: 12` из 18, 66.7% acceptance).
+     - Ответ сгенерирован со спекулятивным декодированием MTP + n-gram (`draft_n_accepted: 14` из 15, 93.3% acceptance).
 2. **Возврат на primary модель (`coder390`)**:
-   - При запросе к `coder390` контейнер `flash-next-llama-server` был остановлен и освободил 32GB VRAM.
-   - `coder390-llama-server` запустился и вернулся в состояние `ready`.
+   - При запросе к `coder390` контейнер `flash-next-llama-server` был остановлен и освободил 28GB RAM и 32GB VRAM.
+   - `coder390-llama-server` запустился и вернулся в состояние `ready` (13.88 GiB RAM).
 3. **Состояние репозитория и окружения**:
-   - Все изменения запушены в GitHub `origin/master` (`1080116`).
+   - Все изменения запушены в GitHub `origin/master` (`80f0155`).
    - Удаленный хост `192.168.50.38` полностью синхронизирован в `/opt/local-llm` и `/opt/models/flash_next`.
