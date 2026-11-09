@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# Специализированный образ NInfer под архитектуру Volta sm_70 (Tesla V100 32GB)
+# Движок: https://github.com/JimmyMax/ninfer-v100 (v1.7.2)
+# ==============================================================================
+
+ARG CUDA_VERSION=12.8.0
+ARG UBUNTU_VERSION=24.04
+ARG NINFER_VERSION=v1.7.2
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NINFER_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    libavformat60 \
+    libavcodec60 \
+    libavutil58 \
+    libswscale7 \
+    libcurl4 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Загрузка и распаковка релизного бинарника ninfer-serve под sm_70
+RUN curl -fsSL "https://github.com/JimmyMax/ninfer-v100/releases/download/${NINFER_VERSION}/ninfer-serve-sm70.tar.gz" -o /tmp/ninfer-serve-sm70.tar.gz \
+    && mkdir -p /tmp/ninfer-bin \
+    && tar -xzf /tmp/ninfer-serve-sm70.tar.gz -C /tmp/ninfer-bin \
+    && BIN_FILE=$(find /tmp/ninfer-bin -type f -name 'ninfer-serve*' -o -name 'ninfer-multicall' | head -n 1) \
+    && cp "$BIN_FILE" /usr/local/bin/ninfer-serve \
+    && chmod +x /usr/local/bin/ninfer-serve \
+    && rm -rf /tmp/ninfer-bin /tmp/ninfer-serve-sm70.tar.gz
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NINFER_HOST=0.0.0.0 \
+    NINFER_PORT=8080
+
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+
+CMD ["ninfer-serve", "--help"]

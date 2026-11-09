@@ -1,0 +1,126 @@
+services:
+  flash-next-ninfer-v100:
+    build:
+      context: .
+      dockerfile: Dockerfile.ninfer-v100
+    image: ninfer-v100:1.7.2
+    container_name: ${CONTAINER_NAME:-flash-next-llama-server}
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "${HOST_BIND_IP:-0.0.0.0}:${FLASH_NEXT_PORT:-8087}:8080"
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      - FLASH_NEXT_MODEL_FILE=${FLASH_NEXT_MODEL_FILE:-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-ninfer-v3.ninfer}
+      - FLASH_NEXT_NGRAM_FILE=${FLASH_NEXT_NGRAM_FILE:-Qwen3.8-Flash-Next-ngram-table-IQ4_NL-ninfer-v3.ninfer}
+      - FLASH_NEXT_ALIAS=${FLASH_NEXT_ALIAS:-qwen3.8-flash-next}
+      - FLASH_NEXT_API_KEY=${FLASH_NEXT_API_KEY:-}
+      # Рекомендованные параметры JimmyMax/ninfer-v100 для Qwen3.8-Flash-Next MoE на Tesla V100 32GB
+      - FLASH_NEXT_MAX_CONTEXT=${FLASH_NEXT_MAX_CONTEXT:-200000}
+      - FLASH_NEXT_KV_CAPACITY=${FLASH_NEXT_KV_CAPACITY:-auto}
+      - FLASH_NEXT_KV_DTYPE=${FLASH_NEXT_KV_DTYPE:-rk4v4}
+      - FLASH_NEXT_EXPERT_RESIDENCY=${FLASH_NEXT_EXPERT_RESIDENCY:-disk}
+      - FLASH_NEXT_NGRAM_RESIDENCY=${FLASH_NEXT_NGRAM_RESIDENCY:-disk}
+      - FLASH_NEXT_EXPERT_PREFILL_BUFFERS=${FLASH_NEXT_EXPERT_PREFILL_BUFFERS:-2}
+      - FLASH_NEXT_EXPERT_DMA_SHARE=${FLASH_NEXT_EXPERT_DMA_SHARE:-1}
+      - FLASH_NEXT_PREFILL_CHUNK=${FLASH_NEXT_PREFILL_CHUNK:-2048}
+      - FLASH_NEXT_MAX_CONCURRENCY=${FLASH_NEXT_MAX_CONCURRENCY:-1}
+      - FLASH_NEXT_SPEC_BACKEND=${FLASH_NEXT_SPEC_BACKEND:-mtp}
+      - FLASH_NEXT_SPEC_DRAFT_TOKENS=${FLASH_NEXT_SPEC_DRAFT_TOKENS:-3}
+      - FLASH_NEXT_NGRAM_DRAFT_TOKENS=${FLASH_NEXT_NGRAM_DRAFT_TOKENS:-0}
+      - FLASH_NEXT_PRESERVE_THINKING=${FLASH_NEXT_PRESERVE_THINKING:-true}
+      - FLASH_NEXT_ENABLE_VISION=${FLASH_NEXT_ENABLE_VISION:-true}
+      - FLASH_NEXT_PENDING_TIMEOUT_MS=${FLASH_NEXT_PENDING_TIMEOUT_MS:-1200000}
+      - FLASH_NEXT_EXTRA_ARGS=${FLASH_NEXT_EXTRA_ARGS:-}
+    volumes:
+      - "${FLASH_NEXT_MODELS_DIR:-/opt/models/flash_next}:/workspace/models:ro"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "======================================================================"
+        echo " [JimmyMax/ninfer-v100] Запуск Qwen3.8-Flash-Next MoE на Tesla V100"
+        echo "======================================================================"
+
+        SERVER_BIN="/usr/local/bin/ninfer-serve"
+        MODEL_PATH="/workspace/models/$${FLASH_NEXT_MODEL_FILE}"
+        NGRAM_PATH="/workspace/models/$${FLASH_NEXT_NGRAM_FILE}"
+
+        if [ ! -f "$$MODEL_PATH" ]; then
+          echo "ОШИБКА: Файл модели $$MODEL_PATH не найден!"
+          exit 1
+        fi
+
+        ARGS="$$MODEL_PATH --host 0.0.0.0 --port 8080"
+
+        if [ -f "$$NGRAM_PATH" ]; then
+          ARGS="$$ARGS --ngram-table $$NGRAM_PATH"
+          if [ -n "$$FLASH_NEXT_NGRAM_RESIDENCY" ]; then
+            ARGS="$$ARGS --ngram-residency $$FLASH_NEXT_NGRAM_RESIDENCY"
+          fi
+        else
+          echo "ПРЕДУПРЕЖДЕНИЕ: Файл n-gram таблицы $$NGRAM_PATH не найден. Попытка запуска без --ngram-table..."
+        fi
+
+        if [ -n "$$FLASH_NEXT_ALIAS" ]; then
+          ARGS="$$ARGS --model-id $$FLASH_NEXT_ALIAS"
+        fi
+
+        if [ -n "$$FLASH_NEXT_API_KEY" ]; then
+          ARGS="$$ARGS --api-key $$FLASH_NEXT_API_KEY"
+        fi
+
+        ARGS="$$ARGS --max-context $${FLASH_NEXT_MAX_CONTEXT:-200000}"
+        ARGS="$$ARGS --kv-capacity $${FLASH_NEXT_KV_CAPACITY:-auto}"
+        ARGS="$$ARGS --kv-dtype $${FLASH_NEXT_KV_DTYPE:-rk4v4}"
+        ARGS="$$ARGS --expert-residency $${FLASH_NEXT_EXPERT_RESIDENCY:-disk}"
+        ARGS="$$ARGS --prefill-chunk $${FLASH_NEXT_PREFILL_CHUNK:-2048}"
+        ARGS="$$ARGS --max-concurrency $${FLASH_NEXT_MAX_CONCURRENCY:-1}"
+        ARGS="$$ARGS --pending-timeout-ms $${FLASH_NEXT_PENDING_TIMEOUT_MS:-1200000}"
+
+        if [ -n "$$FLASH_NEXT_EXPERT_PREFILL_BUFFERS" ]; then
+          ARGS="$$ARGS --expert-prefill-buffers $$FLASH_NEXT_EXPERT_PREFILL_BUFFERS"
+        fi
+
+        if [ -n "$$FLASH_NEXT_EXPERT_DMA_SHARE" ]; then
+          ARGS="$$ARGS --expert-dma-share $$FLASH_NEXT_EXPERT_DMA_SHARE"
+        fi
+
+        if [ "$${FLASH_NEXT_SPEC_BACKEND}" != "none" ]; then
+          ARGS="$$ARGS --spec $${FLASH_NEXT_SPEC_BACKEND:-mtp} --draft-tokens $${FLASH_NEXT_SPEC_DRAFT_TOKENS:-3} --lm-head-draft"
+          ARGS="$$ARGS --ngram-draft-tokens $${FLASH_NEXT_NGRAM_DRAFT_TOKENS:-0}"
+        fi
+
+        if [ "$$FLASH_NEXT_PRESERVE_THINKING" = "true" ]; then
+          ARGS="$$ARGS --preserve-thinking"
+        fi
+
+        if [ "$$FLASH_NEXT_ENABLE_VISION" = "true" ]; then
+          ARGS="$$ARGS --vision"
+        fi
+
+        if [ -n "$$FLASH_NEXT_EXTRA_ARGS" ]; then
+          ARGS="$$ARGS $$FLASH_NEXT_EXTRA_ARGS"
+        fi
+
+        echo "Запуск: $$SERVER_BIN $$ARGS"
+        exec $$SERVER_BIN $$ARGS
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ "${TARGET_GPU_UUID:-GPU-733ae7cc-c1bf-3352-42d5-ba2762470325}" ]
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || curl -sf http://localhost:8080/v1/models >/dev/null || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 25
+      start_period: 30s

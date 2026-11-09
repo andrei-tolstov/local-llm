@@ -17,7 +17,11 @@ sleep 2
 
 echo "[2/3] Запуск сервиса coder390-server (ninfer-serve)..."
 cd "$TARGET_DIR"
-docker compose --env-file .env -f docker-compose.coder390.yml up -d
+COMPOSE_FILE="docker-compose.ninfer-v100.yml"
+if [ ! -f "$TARGET_DIR/$COMPOSE_FILE" ]; then
+    COMPOSE_FILE="docker-compose.coder390.yml"
+fi
+docker compose --env-file .env -f "$COMPOSE_FILE" up -d
 
 echo "[3/3] Ожидание инициализации модели на порту 8084..."
 i=0

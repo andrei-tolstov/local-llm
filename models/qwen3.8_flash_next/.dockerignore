@@ -1,0 +1,6 @@
+*.ninfer
+*.gguf
+*.bin
+*.pt
+.env
+tmp_dl/
