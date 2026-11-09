@@ -44,107 +44,51 @@ services:
     networks:
       - deepseek-net
 
-  # ---------------------------------------------------------------------------
-  # VS Code (code-server): веб-редактор для удобного доступа к workspace
-  # ---------------------------------------------------------------------------
-  vscode:
-    image: docker.io/codercom/code-server:latest
-    container_name: deepseek-vscode
-    restart: unless-stopped
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        if grep -q "/etc/code-server" /home/coder/.local/share/code-server/coder.json 2>/dev/null; then
-          rm -f /home/coder/.local/share/code-server/coder.json
-        fi
-        if [ ! -f /home/coder/deepseek.code-workspace ]; then
-          cat << 'EOF' > /home/coder/deepseek.code-workspace
-        {
-          "folders": [
-            { "name": "Workspace", "path": "/workspace" },
-            { "name": "DSH (DeepSeek Harness)", "path": "/dsh" },
-            { "name": "Hermes Agent", "path": "/hermes" }
-          ],
-          "settings": {
-            "editor.tabSize": 2,
-            "editor.insertSpaces": true
-          }
-        }
-        EOF
-          chown 1000:1000 /home/coder/deepseek.code-workspace 2>/dev/null || true
-        fi
-        exec code-server \
-          --bind-addr 0.0.0.0:8080 \
-          --auth "$${VSCODE_AUTH:-none}" \
-          $${VSCODE_CERT:+--cert} \
-          --disable-telemetry \
-          --disable-update-check \
-          --disable-workspace-trust \
-          /home/coder/deepseek.code-workspace
-    ports:
-      - "${HOST_BIND_IP:-127.0.0.1}:${VSCODE_PORT:-8443}:8080"
-    environment:
-      - TZ=${TZ:-Europe/Moscow}
-      - PASSWORD=${VSCODE_PASSWORD:-}
-      - VSCODE_AUTH=${VSCODE_AUTH:-none}
-      - VSCODE_CERT=${VSCODE_CERT:-}
-      - DOCKER_USER=coder
-    volumes:
-      - vscode-data:/home/coder
-      - ${WORKSPACE_DIR:-./workspace}:/workspace
-      - ${DSH_DIR:-./data/dsh}:/dsh
-      - ${HERMES_DIR:-./data/hermes}:/hermes
-    depends_on:
-      workspace-init:
-        condition: service_completed_successfully
-    networks:
-      - deepseek-net
 
   # ---------------------------------------------------------------------------
   # AnyJev: System 1 Decision Studio & REST API (Tacit-4B via AnyJev + llama-server)
   # Качественные дискретные решения (choice, noul, score) с L0 дебиасингом (100% VRAM)
   # ---------------------------------------------------------------------------
-  anyjev:
-    build:
-      context: ./anyjev
-      dockerfile: Dockerfile
-    container_name: deepseek-anyjev
-    restart: unless-stopped
-    ports:
-      - "${HOST_BIND_IP:-127.0.0.1}:${LAYA_PORT:-8080}:8080"
-      - "${HOST_BIND_IP:-127.0.0.1}:${LAYA_MCP_PORT:-8787}:8787"
-    environment:
-      - PORT=8080
-      - MCP_PORT=${LAYA_MCP_PORT:-8787}
-      - DEVICE=${LAYA_DEVICE:-cuda}
-      - MODEL_PATH=/models/Tacit-4B-Q4_K_M.gguf
-      - CTX_SIZE=2048
-      - N_GPU_LAYERS=99
-      - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
-      - TZ=${TZ:-Europe/Moscow}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: [ '${ANYJEV_GPU_UUID:-GPU-7b86aac7-cea5-5401-ceb0-463b5df668b1}' ]
-              capabilities: [ gpu ]
-    volumes:
-      - ${MODELS_DIR:-./models}:/models
-      - ./anyjev/anyjev_server.py:/app/anyjev_server.py:ro
-      - ./anyjev/entrypoint.sh:/app/entrypoint.sh:ro
-    networks:
-      deepseek-net:
-        aliases:
-          - laya
-          - anyjev
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health && curl -f http://localhost:8787/health" ]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
+  # anyjev:
+  #   build:
+  #     context: ./anyjev
+  #     dockerfile: Dockerfile
+  #   container_name: deepseek-anyjev
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${HOST_BIND_IP:-127.0.0.1}:${LAYA_PORT:-8080}:8080"
+  #     - "${HOST_BIND_IP:-127.0.0.1}:${LAYA_MCP_PORT:-8787}:8787"
+  #   environment:
+  #     - PORT=8080
+  #     - MCP_PORT=${LAYA_MCP_PORT:-8787}
+  #     - DEVICE=${LAYA_DEVICE:-cuda}
+  #     - MODEL_PATH=/models/Tacit-4B-Q4_K_M.gguf
+  #     - CTX_SIZE=2048
+  #     - N_GPU_LAYERS=99
+  #     - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
+  #     - TZ=${TZ:-Europe/Moscow}
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: [ '${ANYJEV_GPU_UUID:-GPU-7b86aac7-cea5-5401-ceb0-463b5df668b1}' ]
+  #             capabilities: [ gpu ]
+  #   volumes:
+  #     - ${MODELS_DIR:-./models}:/models
+  #     - ./anyjev/anyjev_server.py:/app/anyjev_server.py:ro
+  #     - ./anyjev/entrypoint.sh:/app/entrypoint.sh:ro
+  #   networks:
+  #     deepseek-net:
+  #       aliases:
+  #         - laya
+  #         - anyjev
+  #   healthcheck:
+  #     test: [ "CMD-SHELL", "curl -f http://localhost:8080/health && curl -f http://localhost:8787/health" ]
+  #     interval: 20s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 40s
 
   # ---------------------------------------------------------------------------
   # Backup: автоматическое резервное копирование данных на Google Диск через rclone
