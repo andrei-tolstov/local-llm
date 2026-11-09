@@ -26,7 +26,10 @@ services:
       - FLASH_NEXT_KV_DTYPE=${FLASH_NEXT_KV_DTYPE:-rk4v4}
       - FLASH_NEXT_EXPERT_RESIDENCY=${FLASH_NEXT_EXPERT_RESIDENCY:-disk}
       - FLASH_NEXT_EXPERT_CACHE_MIB=${FLASH_NEXT_EXPERT_CACHE_MIB:-18432}
-      - FLASH_NEXT_NGRAM_RESIDENCY=${FLASH_NEXT_NGRAM_RESIDENCY:-disk}
+      - FLASH_NEXT_NGRAM_RESIDENCY=${FLASH_NEXT_NGRAM_RESIDENCY:-ram}
+      - FLASH_NEXT_NGRAM_RAM_MIB=${FLASH_NEXT_NGRAM_RAM_MIB:-}
+      - FLASH_NEXT_NGRAM_LOCK=${FLASH_NEXT_NGRAM_LOCK:-true}
+      - FLASH_NEXT_HOST_CACHE_MIB=${FLASH_NEXT_HOST_CACHE_MIB:-0}
       - FLASH_NEXT_EXPERT_PREFILL_BUFFERS=${FLASH_NEXT_EXPERT_PREFILL_BUFFERS:-}
       - FLASH_NEXT_EXPERT_DMA_SHARE=${FLASH_NEXT_EXPERT_DMA_SHARE:-1}
       - FLASH_NEXT_PREFILL_CHUNK=${FLASH_NEXT_PREFILL_CHUNK:-2048}
@@ -65,6 +68,12 @@ services:
           if [ -n "$$FLASH_NEXT_NGRAM_RESIDENCY" ]; then
             ARGS="$$ARGS --ngram-residency $$FLASH_NEXT_NGRAM_RESIDENCY"
           fi
+          if [ -n "$$FLASH_NEXT_NGRAM_RAM_MIB" ]; then
+            ARGS="$$ARGS --ngram-ram-mib $$FLASH_NEXT_NGRAM_RAM_MIB"
+          fi
+          if [ "$$FLASH_NEXT_NGRAM_LOCK" = "true" ]; then
+            ARGS="$$ARGS --ngram-lock"
+          fi
         else
           echo "ПРЕДУПРЕЖДЕНИЕ: Файл n-gram таблицы $$NGRAM_PATH не найден. Попытка запуска без --ngram-table..."
         fi
@@ -83,6 +92,9 @@ services:
         ARGS="$$ARGS --expert-residency $${FLASH_NEXT_EXPERT_RESIDENCY:-disk}"
         if [ -n "$$FLASH_NEXT_EXPERT_CACHE_MIB" ]; then
           ARGS="$$ARGS --expert-cache-mib $$FLASH_NEXT_EXPERT_CACHE_MIB"
+        fi
+        if [ -n "$$FLASH_NEXT_HOST_CACHE_MIB" ]; then
+          ARGS="$$ARGS --host-cache-mib $$FLASH_NEXT_HOST_CACHE_MIB"
         fi
         ARGS="$$ARGS --prefill-chunk $${FLASH_NEXT_PREFILL_CHUNK:-2048}"
         ARGS="$$ARGS --max-concurrency $${FLASH_NEXT_MAX_CONCURRENCY:-1}"
