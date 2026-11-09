@@ -357,3 +357,13 @@
       vision:
         timeout: 1200
     ```
+
+## Llama-Swap Container Lifecycle & JimmyMax NInfer MoE Flags
+- **Предварительное создание контейнеров для llama-swap (`docker start -a`)**:
+  В `llama-swap` супервизор переключает модели командой `docker start -a <container>`. Поскольку `llama-swap` работает внутри Docker-контейнера без смонтированных каталогов моделей хоста (`/opt/models`), вызовы `docker compose` изнутри контейнера невозможны.
+  - **Правило**: Все целевые контейнеры моделей обязаны быть предварительно созданы в Docker daemon хоста (`docker compose up --no-start`).
+- **Специфика флагов JimmyMax/ninfer-v100 для Qwen3.8-Flash-Next MoE**:
+  1. **Флаг `--lm-head-draft`**: В Flash-Next используется встроенный shared-Q8_0 блок MTP. Передача `--lm-head-draft` приводит к ошибке `qwen4_exp_core.cpp` при валидации ProposalHead. Использовать строго `--spec mtp --draft-tokens 3 --ngram-draft-tokens 0`.
+  2. **Режим `--expert-residency disk` vs `--expert-prefill-buffers`**: Флаг `--expert-prefill-buffers` разрешен только при `expert-residency host`. При `disk` передача флага вызывает `ERROR --expert-prefill-buffers needs GGUF host experts`. Для режима `disk` этот флаг передавать запрещено.
+  3. **Размер кэша экспертов `--expert-cache-mib`**: По умолчанию auto-размер кэша в режиме `disk` аллоцирует всего 980 MiB (196 слотов экспертов). При прогреве (warmup) слой может потребовать маршрутизацию 221 эксперта, что вызывает сбой `expert stream: one layer routes to 221 experts but the device cache holds 196`. На карте Tesla V100 32GB следует явно задавать `--expert-cache-mib 18432` (18 GiB), выделяющий ~5600 слотов экспертов и оставляющий ~4.74 GiB VRAM под KV-кэш и веса.
+  4. **Безопасность `cmdStop` в `llama-swap/config.yaml`**: При остановке контейнеров всегда направлять stderr в `/dev/null` (`docker stop -t 5 <container> 2>/dev/null || true`), чтобы отсутствие или предварительная остановка контейнера не порождала ошибки в логах супервизора.
