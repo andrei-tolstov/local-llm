@@ -6,7 +6,7 @@
 
 int main(int argc, char** argv) {
     int duration_sec = (argc > 1) ? std::atoi(argv[1]) : 5;
-    const int N = 4096;
+    int N = (argc > 2) ? std::atoi(argv[2]) : 4096;   // размер матрицы: меньше N — меньше VRAM
     size_t size = (size_t)N * N * sizeof(half);
 
     half *d_A, *d_B, *d_C;
