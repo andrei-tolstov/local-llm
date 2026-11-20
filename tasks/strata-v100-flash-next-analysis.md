@@ -9,7 +9,7 @@
 |---|---|---|
 | GPU | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv` | 0: Tesla V100-PCIE-32GB, 32768 MiB, sm_70, UUID `GPU-733ae7cc-c1bf-3352-42d5-ba2762470325`; 1: GTX 1060 3GB, sm_61, UUID `GPU-7b86aac7-cea5-5401-ceb0-463b5df668b1` |
 | Драйвер | `nvidia-smi --query-gpu=driver_version` | 550.163.01 (нативно CUDA 12.4) |
-| VRAM сейчас | `nvidia-smi --query-gpu=memory.used --format=csv` | 31242 MiB занято процессом `/usr/local/bin/ninfer-serve` (контейнер `flash-next-llama-server), свободно 1253 MiB |
+| VRAM сейчас | `nvidia-smi --query-gpu=memory.used --format=csv` | 31242 MiB занято процессом `/usr/local/bin/ninfer-serve` (контейнер `flash-next-llama-server`), свободно 1253 MiB |
 | CPU | `lscpu`, `grep flags` | Intel Xeon E5-2650 v2, 8 ядер / 8 потоков, HT выключена. Есть avx, f16c, sse4.2; **AVX2 нет**, AVX-512 нет, BMI2/FMA нет |
 | RAM | `free -b` | 67 367 206 912 B = 62.74 GiB; `docker stats`: `flash-next-llama-server` 58.56 GiB (93.34%), остальные контейнеры суммарно ~0.35 GiB; Swap 23.5 G, занято 1.1 G |
 | Hugepages | `grep -i hugepages /proc/meminfo` | HugePages_Total: 0 |
@@ -70,7 +70,7 @@
 в RAM 36 GiB и 4 GiB запаса. Но GGUF-файл 83.6 GB не помещается на раздел с 80 GB —
 для него нужно освобождать ~100 GB.
 
-## 4. Итоговый профиль запуска (лежит в `.env.strata-v100.example)
+## 4. Итоговый профиль запуска (лежит в .env.strata-v100.example)
 
 - Контекст: `CONTEXT=262144`, `MODEL=IQ2_XS`, `FAMILY=qwen`
 - KV: `KV=int8`, `KV_STREAMING=on` (+ `--kv-resident 32768` в engine_args конфига)
@@ -92,7 +92,30 @@
   здесь оставлены на ручное включение
 - Опции разноса слоёв на пару карт (`STRATA_SPLIT_*`) убраны: карта одна
 
-## 5. Проверено и не проверено
+## 5. Три яруса памяти: разбор по исходникам setup.py
+
+Схема "кэш экспертов на GPU, модель в RAM, n-gram на диске" - штатный режим Strata,
+а не отдельная настройка:
+
+| Ярус | Как включается | Расчёт для этого хоста |
+|---|---|---|
+| Кэш экспертов в VRAM | флаг `--expert-cache auto` ставится всегда | low_ram_gpu_gb = VRAM - 5 - (ctx - 32768) * 13 * 1056 / 1e9 = 32 - 5 - 3.15 = ~23.9 GB при 262144 |
+| Эксперты в RAM | `--low-ram off` (вся арена), `resident` (дает `--resident-experts`), `on` или `mmap` (дает `--mmap-experts`) | resident проходит: нужно RAM >= арена - VRAM-кэш + 10 = 50.3 - 23.9 + 10 = 36.4 GB при 62.74 |
+| N-gram (PLE) с диска | по умолчанию `--ple-io direct`: небуферизованные чтения мимо кэша ОС, строки IQ4_NL по 90 байт | 28.8 GB на NVMe Samsung 970 EVO Plus, queue/rotational = 0. `--ple-io ram` требует арена + 28.8 + 16 GB (~95 GB) и на 62.74 GB не включается |
+
+Отсюда поправка к профилю IQ3_S: при `LOW_RAM=off` действует правило RAM из #406
+(арена + контекст на 13 слоев по 1056 байт + 24 GB), которое при 62.74 GB разрешает
+максимум 131072 токенов - на 262144 нужно 77.9 GB. С `LOW_RAM=resident` KV остаётся в
+VRAM и правило RAM контекст не ограничивает, поэтому 262144 для IQ3_S доступен только в
+режиме resident. Для IQ2_XS правило RAM не ограничивает (арена 35.5 GB), там остаётся
+`LOW_RAM=off`.
+
+Флаг `--resident-budget-gib` к нашим пакетам отношения не имеет: он для Unsloth-файлов
+UD-Q4_K_XL / UD-IQ4_XS и NVFP4-пакетов. В первом описании переменных это было указано
+неверно - исправлено в .env.strata-v100.example.
+
+
+## 6. Проверено и не проверено
 
 Проверено машинно:
 - `docker compose config` для нового файла — ошибки нет, device_ids и env разворачиваются;

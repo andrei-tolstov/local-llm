@@ -97,6 +97,20 @@ jmnargi-strata-engine/
 | RAM хоста | 62.74 GiB всего; ninfer-профиль держит 58.56 GiB => движки живут по одному |
 | Диск | 80 GB свободно: IQ3_S не помещается (83.6 GB + распаковка пакета), IQ2_XS впритык |
 
+### Три яруса памяти в Strata (аналог ninfer: expert cache / expert-residency / ngram-residency)
+
+| Ярус | Чем задаётся | Значение на этом хосте |
+|---|---|---|
+| VRAM: кэш экспертов | `--expert-cache auto` стоит в конфиге всегда | ~23.9 GB экспертов при 262144 (VRAM - 5 GB на dense, буферы и KV на 32K - KV сверх 32K) |
+| RAM: остальные эксперты | `LOW_RAM=off` (вся арена) / `resident` (`--resident-experts`) / `on` или `mmap` (`--mmap-experts`) | IQ2_XS: арена 35.5 GB целиком в RAM. IQ3_S: нужен `resident`, тогда ~26.5 GB в RAM |
+| NVMe: n-gram (PLE) таблица | `--ple-io`, по умолчанию `direct` - небуферизованные чтения мимо кэша ОС, строки IQ4_NL по 90 байт | 28.8 GB на NVMe 970 EVO Plus, rotational=0; `--ple-io ram` потребовал бы ~95 GB RAM, setup его не включает |
+
+Правило контекста по RAM из setup.py (#406): для IQ3_S и IQ3_XXS нужно арена +
+контекст умножить на 13 умножить на 1056 байт + 24 GB. При 62.74 GB RAM и `LOW_RAM=off`
+это максимум 131072 токенов (на 262144 требуется 77.9 GB). С `LOW_RAM=resident` правило
+не действует - KV живёт в VRAM - и 262144 становится доступен. Для IQ2_XS правило RAM
+не ограничивает вовсе, там остаётся `LOW_RAM=off`.
+
 ### Запуск
 ```bash
 cd jmnargi-strata-engine
