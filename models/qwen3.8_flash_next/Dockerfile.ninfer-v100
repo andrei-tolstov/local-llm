@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libswscale7 \
     libcurl4 \
     libgomp1 \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -36,12 +37,19 @@ RUN curl -fsSL "https://github.com/JimmyMax/ninfer-v100/releases/download/${NINF
     && chmod +x /usr/local/bin/ninfer-serve \
     && rm -rf /tmp/ninfer-bin /tmp/ninfer-serve-sm70.tar.gz
 
+# Скрипт запуска (сервер + монитор). Релизный бинарник v1.7.2 не знает
+# --stats-port и --request-log-jsonl: launch.sh это определяет сам и работает
+# с монитором через основной порт. Сам monitor.py в этот образ не кладётся —
+# для панели нужен образ Dockerfile.ninfer-v100-avx (сборка из ветки движка).
+COPY launch.sh /usr/local/bin/ninfer-launch.sh
+RUN chmod +x /usr/local/bin/ninfer-launch.sh
+
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NINFER_HOST=0.0.0.0 \
     NINFER_PORT=8080
 
-EXPOSE 8080
+EXPOSE 8080 8090
 STOPSIGNAL SIGTERM
 
 CMD ["ninfer-serve", "--help"]

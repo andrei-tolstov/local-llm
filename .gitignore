@@ -2,6 +2,7 @@
 .env*
 !.env.example
 !.env.*.example
+Agents.md
 backup/rclone.conf
 backup/service_account.json
 *.key
@@ -13,6 +14,7 @@ id_*
 
 # Данные контейнеров и черновики
 data/
+models/**/logs/
 workspace/
 backups/
 scratch/
