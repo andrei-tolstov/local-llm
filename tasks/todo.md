@@ -1,47 +1,44 @@
-# Задача: движок Strata-V100 для Qwen3.8-Flash-Next (максимум контекста)
+# Задача: движок Strata-V100 для Qwen3.8-Flash-Next + контекст по рекомендации
 
-Запрос: добавить новый двигатель в `models/qwen3.8_flash_next/`, структуру файлов как в
-`coder390`,.analysis параметров запуска под железо хоста (нужен максимальный контекст),
-пуш в git. https://github.com/jmnargi/Strata-V100#use-strata
+Запрос: добавить движок Strata-V100 в `models/qwen3.8_flash_next/` с раскладкой как у
+`coder390`, проанализировать параметры запуска под железо (максимум контекста), пуш в git.
+Уточнение 2: уменьшить контекст так, чтобы KV-кэш помещался по рекомендации движка,
+использовать уже скачанную модель из /opt/models, файлы запуска разложить как у других
+моделей, снова пуш.
 
 ## План
 
-- [x] 1. Изучить раскладку `models/qwen3.8_coder390/` (один каталог на движок:
-  compose + Dockerfile + .env.example, общие скрипты в корне модели)
-- [x] 2. Замерить железо: GPU/UUID/UUID sm, драйвер, CPU-флаги, RAM, диск
-- [x] 3. Разобрать апстрим: релизы, Dockerfile, docker-entrypoint.sh, setup.py
-  (пины GGUF, контексты, флаги сборки sm_70 / ISA floor, systemd-профиль V100)
-- [x] 4. Написать `jmnargi-strata-engine/`: Dockerfile.strata-v100,
-  docker-compose.strata-v100.yml, .env.strata-v100.example,
-  download_model_strata.sh, setup_and_build_strata.sh, switch-to-strata.sh, .dockerignore
-- [x] 5. Рассчитать профиль максимального контекста и задокументировать его в .env и отчёте
-- [x] 6. Зарегистрировать движок в `llama-swap/config.yaml` (8089, context 262144)
-- [x] 7. Дополнить `models/qwen3.8_flash_next/AGENTS.md` разделом про второй движок
-- [x] 8. Машинная проверка конфигов (compose config, docker build --check, bash -n, yaml parse)
-- [x] 9. Коммит и пуш в origin/master
-- [ ] 10. Первый прогон (скачивание ~68 GB, остановка `flash-next-llama-server`, сборка
-  движка) — отложен: требует места на диске и решения по рабочему контейнеру
+- [x] 1. Раскладка как у coder390: папка движка (compose + Dockerfile + .env.example +
+  .dockerignore), скрипты в корне модели
+- [x] 2. Сборка образа под хост: CUDA 12.8 + sm_70 + STRATA_ISA_FLOOR=avx + SM60
+- [x] 3. Замеры хоста и расчёт памяти/контекста: tasks/strata-v100-flash-next-analysis.md
+- [x] 4. Три яруса памяти движка (VRAM кэш экспертов / RAM эксперты / NVMe PLE) - флаги и
+  числа, поправка: --resident-budget-gib к нашим пакетам не применяется
+- [x] 5. Контекст снижен 262144 -> 131072 по формуле рекомендации из setup.py (7786-7788)
+- [x] 6. Каталоги приведены к соглашению моделей: GGUF /opt/models/flash_next/gguf,
+  данные движка /opt/models/flash_next/strata
+- [x] 7. Скрипты переложены в корень модели (git mv), пути и аргументы поправлены
+- [x] 8. llama-swap: context 131072 у flash-next-strata
+- [x] 9. Проверка конфигов и скриптов, коммит и пуш
+- [ ] 10. Первый прогон: ~76 GB GGUF + сборка образа + остановка flash-next-llama-server
 
 ## Проверка (что реально выполнено)
 
 | Шаг | Команда | Результат |
 |---|---|---|
-| Compose | `docker compose --env-file .env -f docker-compose.strata-v100.yml config` | exit 0, device_ids и переменные разворачиваются |
-| Dockerfile | `docker build --check` | «Check complete, no warnings found»; базовые образы cuda:12.8.0 резолвятся |
-| Скрипты | `bash -n` по трём .sh | ОК |
-| llama-swap | `python3 -c yaml.safe_load` | 8 моделей, `flash-next-strata` → 8089, context 262144 |
-| Железо | nvidia-smi / lscpu / free / df | V100 32GB (занята ninfer на 31.2 GiB), GTX 1060 (sm_61), CPU без AVX2, RAM 62.74 GiB (58.56 занято), диск 80G свободно |
+| Compose | `docker compose --env-file .env.strata-v100.example -f docker-compose.strata-v100.yml config` | exit 0; CONTEXT 131072, каталоги /opt/models/flash_next/{gguf,strata} |
+| Dockerfile | `docker build --check` | «Check complete, no warnings found» |
+| Скрипты | `bash -n` трёх скриптов | ОК |
+| llama-swap | `python3 -c yaml.safe_load` | 8 моделей, flash-next-strata -> 8089, context 131072 |
+| Формат файлов в /opt/models | `od -c` первых 16 байт | магия `NINFER` - не GGUF, переиспользовать нельзя |
+| Формула рекомендации | `sed -n 7786,7788p setup.py` | rec_ctx 131072 по VRAM, RAM-правило даёт тот же 131072 |
 
-## Итог по максимальному контексту
+## Что осталось незакрытым
 
-262144 токенов — нативная длина обучения модели, это +31% к текущим 200 000 у ninfer-профиля
-и потолок без экспериментального rope scaling. KV int8 стоит 276 MiB VRAM на 262144,
-стриминг KV ~3.6 GiB RAM: узкое место не контекст, а арена экспертов и RAM хоста.
-Профиль по умолчанию — IQ2_XS (арена 35.5 GiB). IQ3_S требует 83.6 GB на диск, а свободно 80 GB.
+- GGUF для Strata не скачаны: в /opt/models/flash_next лежат .ninfer-пакеты NInfer.
+  IQ2_XS требует ~76 GB (свободно 80 GB - впритык), IQ3_S ~92 GB - не помещается.
+- Первый прогон (скачивание, сборка образа, остановка рабочего flash-next-llama-server)
+  не выполнялся - нужно решение по диску и окну простоя.
+- В llama-swap/config.yaml остаётся дубль алиаса `flash-next` (у coder390 и у flash-next) -
+  чужая незакоммиченная правка, требовала бы отдельного решения.
 
-## Что осталось незакрытым (осознанно)
-
-- В `llama-swap/config.yaml` (незакоммиченная правка до начала задачи) алиас `flash-next`
-  объявлен и у модели coder390, и у flash-next — дубль. Не трогал, требуется решение.
-- Первый прогон движка не выполнялся: ~68 GB трафика, распаковка пакета и остановка
-  рабочего `flash-next-llama-server`.

@@ -8,7 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="${1:-${SCRIPT_DIR}}"
+# Каталог по умолчанию - gguf-подкаталог рядом с .ninfer-пакетами NInfer. Файлы .ninfer
+# Strata не читает: это пакет движка NInfer (магия NINFER), а не GGUF.
+TARGET_DIR="${1:-${STRATA_MODELS_DIR:-/opt/models/flash_next/gguf}}"
 QUANT="${2:-IQ2_XS}"
 WANT_VISION="${3:-no}"
 

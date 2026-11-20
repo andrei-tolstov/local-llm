@@ -31,16 +31,21 @@ services:
       # ---------------- параметры установки модели (читает docker-entrypoint.sh образа) ----------------
       - FAMILY=${FAMILY:-qwen}
       - MODEL=${MODEL:-IQ2_XS}
-      # Максимальный контекст без rope scaling: 262144 — нативная длина обучения модели.
-      - CONTEXT=${CONTEXT:-262144}
+      # Контекст по рекомендации самого движка: rec_ctx по VRAM (32 GB карта -> 131072), и
+      # минимум из этого с правилом RAM (арена + контекст * 13 * 1056 байт + 24 GB) - для
+      # IQ3_S на 62.7 GB RAM оно тоже даёт 131072. Нативный потолок модели 262144
+      # открывается только с LOW_RAM=resident (на 262144 правилу нужно 77.9 GB RAM).
+      - CONTEXT=${CONTEXT:-131072}
       - VISION=${VISION:-no}
-      # int8 KV: 1056 байт на токен контекста (12 слоёв QSA + MTP-блок) => ~276 MiB на 262144.
+      # int8 KV: 1056 байт на токен контекста (12 слоёв QSA + MTP-блок) => ~138 MiB VRAM на
+      # 131072 (276 MiB на 262144).
       - KV=${KV:-int8}
       - KV_STREAMING=${KV_STREAMING:-on}
-      # off: все эксперты в RAM; on: KV остаётся в VRAM, эксперты читаются с диска.
+      # Ярус экспертов: off = вся арена в RAM; resident = не вошедшие в VRAM копируются в RAM
+      # один раз (--resident-experts); on/mmap = читаются через page cache с NVMe.
       - LOW_RAM=${LOW_RAM:-off}
-      # Потолок экспертов в RAM (GiB): подразумевает --mmap-experts и оставляет 4 GiB запаса.
-      # Пусто = решает setup. Для IQ3_S на этом хосте ставить 36.
+      # К нашим GGUF-пакетам не применяется: флаг --resident-budget-gib движок использует
+      # для Unsloth-файлов UD-Q4_K_XL / UD-IQ4_XS и NVFP4-пакетов.
       - RESIDENT_BUDGET_GIB=${RESIDENT_BUDGET_GIB:-}
       # Одна карта: физически V100 закреплена через device_ids, внутри контейнера она 0.
       - GPU=${STRATA_GPU_INDEX:-0}
@@ -85,9 +90,9 @@ services:
       - REINSTALL=${REINSTALL:-0}
     volumes:
       # GGUF-файлы модели (нужны на настройку и как файловый слой экспертов)
-      - "${STRATA_MODELS_DIR:-/opt/models/flash-next-strata}:/models"
+      - "${STRATA_MODELS_DIR:-/opt/models/flash_next/gguf}:/models"
       # пакет Strata, MTP-слой, конфиг strata-<model>.json, кэш разговоров
-      - "${STRATA_DATA_DIR:-/opt/models/flash-next-strata/data}:/data"
+      - "${STRATA_DATA_DIR:-/opt/models/flash_next/strata}:/data"
     deploy:
       resources:
         reservations:

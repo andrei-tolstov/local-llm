@@ -59,21 +59,26 @@
 
 ---
 
-## Второй движок: Strata-V100 (jmnargi/Strata-V100) — максимум контекста
+## Второй движок: Strata-V100 (jmnargi/Strata-V100)
 
 Тот же чекпоинт, другой движок: llama.cpp-потомок Strata с i-квантами GSQ-RCO в GGUF.
 Раскладка каталога повторяет `models/qwen3.8_coder390`: на каждый движок своя
 подпапка с compose-файлом, Dockerfile и примером окружения.
 
 ```
-jmnargi-strata-engine/
-  docker-compose.strata-v100.yml   # сервис flash-next-strata, порт 8089
-  Dockerfile.strata-v100           # сборка движка: CUDA 12.8 + sm_70 + AVX-пол
-  .env.strata-v100.example         # параметры запуска с замерами хоста
-  download_model_strata.sh         # GGUF с фиксированным revision + SHA-256
-  setup_and_build_strata.sh        # предполётная проверка хоста + сборка образа
-  switch-to-strata.sh              # остановка остальных серверов и запуск
+models/qwen3.8_flash_next/
+  download_model_strata.sh              # GGUF: revision, размеры и SHA-256 зафиксированы
+  setup_and_build_strata.sh             # проверка хоста + сборка образа движка
+  switch-to-strata.sh                   # остановка прочих серверов и запуск Strata
+  jmnargi-strata-engine/
+    docker-compose.strata-v100.yml      # сервис flash-next-strata, порт 8089
+    Dockerfile.strata-v100              # сборка: CUDA 12.8 + sm_70 + AVX-пол
+    .env.strata-v100.example            # параметры запуска с замерами хоста
+    .dockerignore
 ```
+
+Скрипты — в корне модели, как `switch-to-flash-next.sh` и как у `coder390`; внутри
+движка лежат только compose, Dockerfile и пример окружения.
 
 ### Почему образ собирается, а не берётся готовый
 - **CUDA только 12.x**: CUDA 13 не компилирует sm_70 (Volta). Апстримный Dockerfile
@@ -88,20 +93,22 @@ jmnargi-strata-engine/
 ### Контекст и память (замерено на хосте 2026-11-20)
 | Параметр | Значение |
 |---|---|
-| Контекст по умолчанию | **262144** — нативная длина обучения (rotary base 1e7). У ninfer-профиля потолок 200000 |
+| Контекст по умолчанию | **131072** — рекомендация самого движка: `rec_ctx` по VRAM (32 GB карта => 131072) и минимум с правилом RAM |
+| Почему не 262144 | Правилу RAM (`арена + контекст·13·1056 Б + 24 GB`) на 262144 нужно 77.9 GB, а RAM 62.7 GB. 262144 открывается только с `LOW_RAM=resident` (KV тогда в VRAM) |
 | Больше 262144 | Только rope scaling (yarn), в доках помечено EXPERIMENTAL; docker-entrypoint.sh таких флагов не передаёт |
-| KV int8 | 1056 Б на токен (12 слоёв QSA + MTP) => 276 MiB на 262144 |
-| KV streaming | ~13.7 КБ на токен в RAM => ~3.6 GiB на 262144, освобождённую VRAM берёт кэш экспертов |
+| KV int8 | 1056 Б на токен (12 слоёв QSA + MTP) => 138 MiB VRAM на 131072 |
+| KV streaming | ~13.7 КБ на токен в RAM => ~1.8 GiB на 131072, освобождённую VRAM берёт кэш экспертов |
 | Арена экспертов | IQ2_XS 35.5 GiB, IQ3_S 50.3 GiB |
 | Скачивание пакета | IQ2_XS 68.0 GB, IQ3_S 83.6 GB, Q2_0 66.4 GB |
 | RAM хоста | 62.74 GiB всего; ninfer-профиль держит 58.56 GiB => движки живут по одному |
-| Диск | 80 GB свободно: IQ3_S не помещается (83.6 GB + распаковка пакета), IQ2_XS впритык |
+| Диск | 80 GB свободно. По формуле setup.py: IQ2_XS ~76 GB (GGUF + ~8 GB пакета) проходит впритык; IQ3_S ~92 GB — нет, с `resident` ~143 GB |
+| Уже скачанные файлы | В `/opt/models/flash_next` лежат `*.ninfer` (магия `NINFER`) — пакеты движка NInfer, не GGUF. Strata их не читает, GGUF качается отдельно |
 
 ### Три яруса памяти в Strata (аналог ninfer: expert cache / expert-residency / ngram-residency)
 
 | Ярус | Чем задаётся | Значение на этом хосте |
 |---|---|---|
-| VRAM: кэш экспертов | `--expert-cache auto` стоит в конфиге всегда | ~23.9 GB экспертов при 262144 (VRAM - 5 GB на dense, буферы и KV на 32K - KV сверх 32K) |
+| VRAM: кэш экспертов | `--expert-cache auto` стоит в конфиге всегда | ~25.6 GB экспертов при 131072 (VRAM - 5 GB на dense, буферы и KV на 32K - KV сверх 32K); при 262144 оставалось бы ~23.9 GB |
 | RAM: остальные эксперты | `LOW_RAM=off` (вся арена) / `resident` (`--resident-experts`) / `on` или `mmap` (`--mmap-experts`) | IQ2_XS: арена 35.5 GB целиком в RAM. IQ3_S: нужен `resident`, тогда ~26.5 GB в RAM |
 | NVMe: n-gram (PLE) таблица | `--ple-io`, по умолчанию `direct` - небуферизованные чтения мимо кэша ОС, строки IQ4_NL по 90 байт | 28.8 GB на NVMe 970 EVO Plus, rotational=0; `--ple-io ram` потребовал бы ~95 GB RAM, setup его не включает |
 
@@ -113,12 +120,16 @@ jmnargi-strata-engine/
 
 ### Запуск
 ```bash
-cd jmnargi-strata-engine
-cp .env.strata-v100.example .env
-./download_model_strata.sh /opt/models/flash-next-strata IQ2_XS
-./setup_and_build_strata.sh
-./switch-to-strata.sh
+cd models/qwen3.8_flash_next          # на хосте - каталог развёртывания модели
+cp jmnargi-strata-engine/.env.strata-v100.example jmnargi-strata-engine/.env
+./download_model_strata.sh /opt/models/flash_next/gguf IQ2_XS   # ~76 GB
+./setup_and_build_strata.sh                                    # проверка хоста + сборка
+./switch-to-strata.sh                                          # останавливает прочие серверы
 ```
+
+Скрипты принимают каталог первым аргументом (`./switch-to-strata.sh
+/opt/models/flash_next`), как `switch-to-flash-next.sh`. Контекст меняется через
+`CONTEXT` в `.env` вместе с `REINSTALL=1`, чтобы движок пересобрал установку.
 
 - **Прямой эндпоинт**: `http://192.168.50.38:8089/v1` (8087 — ninfer, 8088 — qwen-image)
 - **Llama-Swap**: модель `qwen3.8-flash-next-strata`, алиасы `flash-next-strata`, `flash-next-iq2xs`

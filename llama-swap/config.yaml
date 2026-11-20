@@ -108,7 +108,7 @@ models:
       in: ["text"]
       out: ["text"]
       tools: true
-      context: 262144
+      context: 131072
 
   fluxed-up:
     name: "FLUX.1 Dev Fluxed Up"
