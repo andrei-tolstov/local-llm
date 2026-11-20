@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Переключение V100 на Qwen3.8-Flash-Next в движке Strata (jmnargi/Strata-V100).
+# Останавливает остальные LLM/Diffusion серверы: Strata забирает RAM и VRAM целиком.
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+ENV_FILE=".env"
+[ -f "$ENV_FILE" ] || ENV_FILE=".env.strata-v100.example"
+set -a; . "$ENV_FILE"; set +a
+
+PORT="${STRATA_PORT:-8088}"
+CONTAINER="${CONTAINER_NAME:-flash-next-strata-llama-server}"
+
+echo "======================================================================"
+echo " Переключение на Qwen3.8-Flash-Next (Strata V100)..."
+echo "======================================================================"
+
+echo "[1/3] Остановка других LLM и Diffusion серверов на V100..."
+docker stop \
+    flash-next-llama-server \
+    coder390-llama-server \
+    efficientthink-k3-llama-server \
+    fable-llama-server \
+    qwen38-llama-server \
+    bonsai2-llama-server \
+    fluxed-up-sd-server \
+    juggernaut-sd-server \
+    qwen-image-sd-server 2>/dev/null || true
+sleep 2
+
+echo "[2/3] Запуск сервиса $CONTAINER (strata-serve)..."
+docker compose --env-file "$ENV_FILE" -f docker-compose.strata-v100.yml up -d
+
+echo "[3/3] Ожидание инициализации модели на порту $PORT..."
+# Первый старт включает распаковку пакета Strata из GGUF: 20-40 минут.
+i=0
+while [ $i -lt 400 ]; do
+    if curl -s -f "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
+       || curl -s -f "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+        echo ""
+        echo "[OK] Qwen3.8-Flash-Next (Strata V100) готова к работе!"
+        echo "Прямой эндпоинт:    http://192.168.50.38:$PORT/v1"
+        echo "Через Llama-Swap:   http://192.168.50.38:8090/v1 (qwen3.8-flash-next-strata)"
+        echo "Через OmniRoute:    http://192.168.50.38:20128/v1"
+        docker ps --filter "name=$CONTAINER"
+        exit 0
+    fi
+    printf '.'
+    sleep 6
+    i=$((i + 1))
+done
+
+echo ""
+echo "[!] Сервер ещё загружается. Логи: docker logs -f $CONTAINER"

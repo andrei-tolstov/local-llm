@@ -1,0 +1,105 @@
+services:
+  # Движок Strata (jmnargi/Strata-V100) для Qwen3.8-Flash-Next на одной Tesla V100 32GB.
+  # Раскладка как в models/qwen3.8_coder390: на каждый движок своя папка с
+  # docker-compose.<движок>.yml, Dockerfile.<движок> и .env.<движок>.example.
+  flash-next-strata:
+    build:
+      context: .
+      dockerfile: Dockerfile.strata-v100
+      args:
+        CUDA_VERSION: "12.8.0"
+        STRATA_REF: ${STRATA_REF:-v0.1.45.12}
+        # sm_70 = Volta (V100). CUDA 13 этот arch не компилирует вообще.
+        CUDA_ARCHITECTURES: "70"
+        # AVX-пол: на хосте Xeon E5-2650 v2 без AVX2 (иначе SIGILL, exit 132).
+        STRATA_ISA_FLOOR: avx
+        # Энкодер изображений: 0 = не собирать (экономит ~1.7 GiB VRAM и время сборки).
+        BUILD_VISION: ${BUILD_VISION:-0}
+    image: strata-v100:cuda12.8-sm70-avx
+    container_name: ${CONTAINER_NAME:-flash-next-strata-llama-server}
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "${HOST_BIND_IP:-0.0.0.0}:${STRATA_PORT:-8089}:8080"
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      # ---------------- параметры установки модели (читает docker-entrypoint.sh образа) ----------------
+      - FAMILY=${FAMILY:-qwen}
+      - MODEL=${MODEL:-IQ2_XS}
+      # Максимальный контекст без rope scaling: 262144 — нативная длина обучения модели.
+      - CONTEXT=${CONTEXT:-262144}
+      - VISION=${VISION:-no}
+      # int8 KV: 1056 байт на токен контекста (12 слоёв QSA + MTP-блок) => ~276 MiB на 262144.
+      - KV=${KV:-int8}
+      - KV_STREAMING=${KV_STREAMING:-on}
+      # off: все эксперты в RAM; on: KV остаётся в VRAM, эксперты читаются с диска.
+      - LOW_RAM=${LOW_RAM:-off}
+      # Потолок экспертов в RAM (GiB): подразумевает --mmap-experts и оставляет 4 GiB запаса.
+      # Пусто = решает setup. Для IQ3_S на этом хосте ставить 36.
+      - RESIDENT_BUDGET_GIB=${RESIDENT_BUDGET_GIB:-}
+      # Одна карта: физически V100 закреплена через device_ids, внутри контейнера она 0.
+      - GPU=${STRATA_GPU_INDEX:-0}
+      - HOST=0.0.0.0
+      - PORT=8080
+      - API_KEY=${STRATA_API_KEY:-}
+      # Каталог с уже скачанными GGUF: настройка берёт файлы отсюда, а не качает.
+      - GGUF_DIR=${GGUF_DIR:-/models}
+      # ---------------- профиль V100 из service/strata-v100.service.d форка ----------------
+      # Оставлены только однокарточные опции: STRATA_SPLIT_* (разнос слоёв на пару V100) не применяются.
+      - STRATA_ARENA_LOCK=${STRATA_ARENA_LOCK:-0}
+      - STRATA_WATCHDOG_S=${STRATA_WATCHDOG_S:-300}
+      # Мастер-переключатель Volta: interleaved dense table, expert mode 8, HC-проекция с скрытой задержкой.
+      - STRATA_SM70_TABLE=${STRATA_SM70_TABLE:-1}
+      - STRATA_DEQUANT_WIDE=${STRATA_DEQUANT_WIDE:-1}
+      # Experts в промпте на FP16 тензорных ядрах Volta.
+      - STRATA_PF_WMMA=${STRATA_PF_WMMA:-1}
+      - STRATA_PF_SKIP_UNROUTED=${STRATA_PF_SKIP_UNROUTED:-1}
+      # Эластичный KV: освобождённая VRAM отдаётся кэшу экспертов.
+      - STRATA_KV_GROW=${STRATA_KV_GROW:-1}
+      - STRATA_CKPT_POOL=${STRATA_CKPT_POOL:-1}
+      - STRATA_CKPT_THREADS=${STRATA_CKPT_THREADS:-1}
+      - STRATA_PREFILL_PROMOTE=${STRATA_PREFILL_PROMOTE:-2048}
+      # FP32 tiled QSA scoring: быстрее на длинных чтениях (порядок суммирования другой).
+      - STRATA_SELECT_SIMT=${STRATA_SELECT_SIMT:-1}
+      # CPU-помощь в префилле. На 8 потоках Ivy Bridge по умолчанию выключена: она
+      # отнимает потоки у и без того AVX-1 декодирования. auto возвращает поведение форка.
+      - STRATA_PREFILL_CPU_SHARE=${STRATA_PREFILL_CPU_SHARE:-0}
+      - STRATA_PREFILL_STREAM_MIN=${STRATA_PREFILL_STREAM_MIN:-6144}
+      - STRATA_PREFILL_CPU_SHARE_MAX=${STRATA_PREFILL_CPU_SHARE_MAX:-6144}
+      - STRATA_PREFILL_LOAN_EXACT=${STRATA_PREFILL_LOAN_EXACT:-1}
+      # Опции форка, меняющие ответы модели (на паре V100 включены) — здесь выключены:
+      # - STRATA_ROUTE_RESIDENT=1
+      # - STRATA_VERIFY_ECAP=16
+      # - STRATA_PF_WMMA_LEAN=1
+      # ---------------- выбор конфига установки ----------------
+      # Доп. аргументы движка задаются не здесь: docker-entrypoint.sh их не читает,
+      # они живут в engine_args внутри /data/config/strata-<model>.json.
+      # CONFIG задать, чтобы стартовать другой сохранённый конфиг.
+      - CONFIG=${CONFIG:-}
+      # REINSTALL=1 пересобирает установку модели (смена контекста, KV, пакета).
+      - REINSTALL=${REINSTALL:-0}
+    volumes:
+      # GGUF-файлы модели (нужны на настройку и как файловый слой экспертов)
+      - "${STRATA_MODELS_DIR:-/opt/models/flash-next-strata}:/models"
+      # пакет Strata, MTP-слой, конфиг strata-<model>.json, кэш разговоров
+      - "${STRATA_DATA_DIR:-/opt/models/flash-next-strata/data}:/data"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # ТОЛЬКО Tesla V100 32GB. GTX 1060 3GB (sm_61) контейнеру не отдаётся:
+              # она ниже Volta, а движок собран под sm_70.
+              device_ids: [ "${TARGET_GPU_UUID:-GPU-733ae7cc-c1bf-3352-42d5-ba2762470325}" ]
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 600s

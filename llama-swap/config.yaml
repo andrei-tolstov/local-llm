@@ -7,21 +7,21 @@ unloadTimeout: 15
 hooks:
   on_startup:
     preload:
-      - "coder390"
+      - "flash-next"
 
 models:
   coder390:
     name: "Qwen3.8 27B Coder390 EfficientThink"
     proxy: "http://192.168.50.38:8084"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a coder390-llama-server"
+      sh -c "docker stop efficientthink-k3-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a coder390-llama-server"
     cmdStop: "docker stop -t 5 coder390-llama-server"
     checkEndpoint: "/health"
     useModelName: "coder390-27b"
     ttl: 0
     aliases:
       - "coder390-27b"
-      - "coder390"
+      - "flash-next"
       - "coder"
       - "qwen3.8-coder390"
     capabilities:
@@ -34,7 +34,7 @@ models:
     name: "DavidAU Qwen3.8 27B Fable Cold Fusion"
     proxy: "http://192.168.50.38:8083"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a fable-llama-server"
+      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a fable-llama-server"
     cmdStop: "docker stop -t 5 fable-llama-server"
     checkEndpoint: "/health"
     useModelName: "fable-cold-fusion-27b"
@@ -53,7 +53,7 @@ models:
     name: "HauhauCS Qwen3.8 27B Aggressive MTP"
     proxy: "http://192.168.50.38:8081"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a qwen38-llama-server"
+      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a qwen38-llama-server"
     cmdStop: "docker stop -t 5 qwen38-llama-server"
     checkEndpoint: "/health"
     useModelName: "qwen3.8-27b"
@@ -72,7 +72,7 @@ models:
     name: "Qwen3.8 Flash Next MoE 125B (IQ3_S NInfer V100)"
     proxy: "http://192.168.50.38:8087"
     cmd: >
-      sh -c "docker stop coder390-llama-server efficientthink-k3-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server 2>/dev/null || true; exec docker start -a flash-next-llama-server"
+      sh -c "docker stop coder390-llama-server efficientthink-k3-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server flash-next-strata-llama-server 2>/dev/null || true; exec docker start -a flash-next-llama-server"
     cmdStop: "docker stop -t 5 flash-next-llama-server 2>/dev/null || true"
     checkEndpoint: "/health"
     useModelName: "qwen3.8-flash-next"
@@ -88,11 +88,33 @@ models:
       tools: true
       context: 200000
 
+  # Тот же чекпоинт Qwen3.8-Flash-Next, но на движке jmnargi/Strata-V100
+  # (models/qwen3.8_flash_next/jmnargi-strata-engine/). Контекст выше: 262144 —
+  # нативная длина обучения, у ninfer-профиля потолок 200000.
+  flash-next-strata:
+    name: "Qwen3.8 Flash Next MoE 125B (Strata V100, IQ2_XS)"
+    proxy: "http://192.168.50.38:8089"
+    cmd: >
+      sh -c "docker stop flash-next-llama-server coder390-llama-server efficientthink-k3-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server qwen-image-sd-server 2>/dev/null || true; exec docker start -a flash-next-strata-llama-server"
+    cmdStop: "docker stop -t 60 flash-next-strata-llama-server 2>/dev/null || true"
+    checkEndpoint: "/health"
+    useModelName: "qwen3.8-flash-next-strata"
+    ttl: 1200
+    aliases:
+      - "qwen3.8-flash-next-strata"
+      - "flash-next-strata"
+      - "flash-next-iq2xs"
+    capabilities:
+      in: ["text"]
+      out: ["text"]
+      tools: true
+      context: 262144
+
   fluxed-up:
     name: "FLUX.1 Dev Fluxed Up"
     proxy: "http://192.168.50.38:8085"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a fluxed-up-sd-server"
+      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server juggernaut-sd-server qwen-image-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a fluxed-up-sd-server"
     cmdStop: "docker stop -t 5 fluxed-up-sd-server"
     checkEndpoint: "/"
     useModelName: "fluxed-up"
@@ -109,7 +131,7 @@ models:
     name: "Juggernaut XL v9 RunDiffusionPhoto v2"
     proxy: "http://192.168.50.38:8086"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server qwen-image-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a juggernaut-sd-server"
+      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server qwen-image-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a juggernaut-sd-server"
     cmdStop: "docker stop -t 5 juggernaut-sd-server"
     checkEndpoint: "/"
     useModelName: "juggernaut-xl"
@@ -126,7 +148,7 @@ models:
     name: "Qwen-Image 2.1 Turbo Uncensored (Q8_0)"
     proxy: "http://192.168.50.38:8088"
     cmd: >
-      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server flash-next-llama-server 2>/dev/null; exec docker start -a qwen-image-sd-server"
+      sh -c "docker stop efficientthink-k3-llama-server coder390-llama-server fable-llama-server qwen38-llama-server bonsai2-llama-server fluxed-up-sd-server juggernaut-sd-server flash-next-llama-server flash-next-strata-llama-server 2>/dev/null; exec docker start -a qwen-image-sd-server"
     cmdStop: "docker stop -t 5 qwen-image-sd-server"
     checkEndpoint: "/"
     useModelName: "qwen-image"

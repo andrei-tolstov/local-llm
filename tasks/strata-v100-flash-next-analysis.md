@@ -1,0 +1,109 @@
+# Strata-V100 для Qwen3.8-Flash-Next: анализ параметров запуска под хост 192.168.50.38
+
+Дата замеров: 2026-11-20. Цель: максимальный контекст на этом железе, раскладка
+файлов как в `models/qwen3.8_coder390`.
+
+## 1. Замеры хоста (не из документации, а с машины)
+
+| Что | Команда | Результат |
+|---|---|---|
+| GPU | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv` | 0: Tesla V100-PCIE-32GB, 32768 MiB, sm_70, UUID `GPU-733ae7cc-c1bf-3352-42d5-ba2762470325`; 1: GTX 1060 3GB, sm_61, UUID `GPU-7b86aac7-cea5-5401-ceb0-463b5df668b1` |
+| Драйвер | `nvidia-smi --query-gpu=driver_version` | 550.163.01 (нативно CUDA 12.4) |
+| VRAM сейчас | `nvidia-smi --query-gpu=memory.used --format=csv` | 31242 MiB занято процессом `/usr/local/bin/ninfer-serve` (контейнер `flash-next-llama-server), свободно 1253 MiB |
+| CPU | `lscpu`, `grep flags` | Intel Xeon E5-2650 v2, 8 ядер / 8 потоков, HT выключена. Есть avx, f16c, sse4.2; **AVX2 нет**, AVX-512 нет, BMI2/FMA нет |
+| RAM | `free -b` | 67 367 206 912 B = 62.74 GiB; `docker stats`: `flash-next-llama-server` 58.56 GiB (93.34%), остальные контейнеры суммарно ~0.35 GiB; Swap 23.5 G, занято 1.1 G |
+| Hugepages | `grep -i hugepages /proc/meminfo` | HugePages_Total: 0 |
+| Диск | `df -h /` | /dev/mapper/second--vg-root, 433G всего, 332G занято, **80G свободно (81%)** |
+
+## 2. Что эти замеры запрещают
+
+1. **Готовый движок Strata брать нельзя.** Релизный `strata-linux-x64-sm70-cuda12-v0.1.45.12.tar.gz`
+  (и соответствующий образ) собран под AVX2. На Xeon E5-2650 v2 это SIGILL, exit 132 —
+   об этом сам `docker-entrypoint.sh` и раздел INSTALL.md «Older CPUs, experimental».
+   Единственный путь — сборка из исходников с `-DSTRATA_ISA_FLOOR=avx`.
+   Плата по замерам форка: декодирование на CPU-без-AVX2 падает примерно с 26 до 11–17 ток/с.
+2. **CUDA 13 исключён.** CUDA 13 не компилирует sm_70 («CUDA 13 dropped Pascal and Volta»,
+   docs/OLDER_GPUS.md). Апстримный Dockerfile стартует с `nvidia/cuda:13.0.0-devel` —
+   для V100 не годится. Нужен тулкит 12.x; берём 12.8.0 (glibc 2.39, тот же ряд, что
+   у рабочих образов coder390 на этом хосте).
+3. **GTX 1060 (sm_61) контейнеру не отдаётся.** Движок собран под sm_70; прецедент из
+   `models/qwen3.8_coder390/AGENTS.md`: cuda-compat-12-8 на Pascal даёт CUDA error 804,
+   а `--gpus 0,1` — «no kernel image available». Поэтому в compose GPU закрепляется
+   UUID: `device_ids: [GPU-733ae7cc-c1bf-3352-42d5-ba2762470325]`.
+4. **Одновременно с ninfer-профилем Strata не живёт.** 58.56 GiB RAM + 31.2 GiB VRAM уже
+   заняты. `switch-to-strata.sh` останавливает `flash-next-llama-server` и остальные
+   серверы; это осознанный выбор, а не побочный эффект.
+5. **Диск — главное ограничение.** Свободно 80G, а скачивание GGUF: Q2_0 66.4 GB,
+   IQ2_XS 68.0 GB, IQ3_S **83.6 GB** — IQ3_S физически не влезает, IQ2_XS впритык,
+   и сверху нужна ещё распаковка пакета Strata (по докам форка порядок +20–40 GiB).
+   Точный итог по конкретному кванту — проверить при первом прогоне (не подтверждено).
+
+## 3. Сколько контекста реально выжимается
+
+Модель обучена на 262 144 позициях (rotary base 1e7). Это потолок без экспериментальных
+расширений: Strata берёт `--max-context` из метаданных GGUF и отказывает запросам длиннее,
+а не обрезает молча. Список контекстов у setup.py: 8192, 32768, 65536, 131072, 204800,
+**262144**, 393216, 524288 — последние два возможны только через rope scaling
+(yarn, коэффициент = контекст / 262144) и в доках форка помечены EXPERIMENTAL.
+`docker-entrypoint.sh` этих флагов не передаёт, поэтому >262144 настраивается вручную
+через `setup.py --context 524288 --rope-scaling yarn` и в этот профиль не входит.
+
+Итог: **262144 токенов** — это +31% к текущим 200 000 у ninfer-профиля и максимум,
+который держится без экспериментальных флагов.
+
+Цена контекста (по таблице форка для QSA-слоёв Flash-Next):
+- KV int8 = 1056 байт на токен контекста => 262144 токенов = **276 MiB** в VRAM.
+- Стриминг KV держит «холодную» часть в RAM: ~13.7 КБ на токен => **~3.6 GiB** на 262144.
+- Постоянное окно KV в VRAM: `--kv-resident 32768` = ~34 MiB.
+
+То есть на этой гибридной архитектуре контекст — не узкое место по VRAM; узкое место —
+арена экспертов и RAM хоста:
+
+| Пакет | Скачивание | Арена экспертов | Нужно RAM | 262144 на этом хосте |
+|---|---|---|---|---|
+| Q2_0 | 66.4 GB | 34.0 GB | ~48 GB | да, самый быстрый, качество ниже |
+| **IQ2_XS** | 68.0 GB | 35.5 GB | ~48 GB | **да — профиль по умолчанию** |
+| IQ3_S | 83.6 GB | 50.3 GB | ~62 GB | по RAM впритык, на диск не влезает |
+
+Для IQ3_S (полное качество, тот же квант, что у ninfer-профиля) обязательны
+`LOW_RAM=on` и `RESIDENT_BUDGET_GIB=36`: часть экспертов остаётся в пакете на NVMe,
+в RAM 36 GiB и 4 GiB запаса. Но GGUF-файл 83.6 GB не помещается на раздел с 80 GB —
+для него нужно освобождать ~100 GB.
+
+## 4. Итоговый профиль запуска (лежит в `.env.strata-v100.example)
+
+- Контекст: `CONTEXT=262144`, `MODEL=IQ2_XS`, `FAMILY=qwen`
+- KV: `KV=int8`, `KV_STREAMING=on` (+ `--kv-resident 32768` в engine_args конфига)
+- RAM: `LOW_RAM=off` (арена 35.5 GiB целиком в RAM); для IQ3_S — `LOW_RAM=on`,
+  `RESIDENT_BUDGET_GIB=36`
+- GPU: `GPU=0` + `device_ids` по UUID V100, Vision выключен (`VISION=no`,
+  `BUILD_VISION=0`) — экономит ~1.74 GiB VRAM под кэш экспертов
+- Порт 8089 (8087 — ninfer, 8088 — qwen-image в llama-swap)
+- Однокарточная часть профиля V100 из `service/strata-v100.service.d` форка:
+  `STRATA_SM70_TABLE=1`, `STRATA_PF_WMMA=1`, `STRATA_PF_SKIP_UNROUTED=1`,
+  `STRATA_DEQUANT_WIDE=1`, `STRATA_KV_GROW=1`, `STRATA_CKPT_POOL=1`,
+  `STRATA_CKPT_THREADS=1`, `STRATA_PREFILL_PROMOTE=2048`, `STRATA_SELECT_SIMT=1`,
+  `STRATA_PREFILL_STREAM_MIN=6144`, `STRATA_PREFILL_CPU_SHARE_MAX=6144`,
+  `STRATA_PREFILL_LOAN_EXACT=1`, `STRATA_ARENA_LOCK=0`, `STRATA_WATCHDOG_S=300`
+- `STRATA_PREFILL_CPU_SHARE=0` — в форке там `auto`, но на 8 потоках Ivy Bridge без AVX2
+  CPU-помощь в префилле отнимает потоки у и без того медленного декодирования
+- Опции, меняющие ответы модели (`STRATA_ROUTE_RESIDENT=1`, `STRATA_VERIFY_ECAP=16`,
+  `STRATA_PF_WMMA_LEAN=1`), закомментированы: на паре V100 в форке они включены,
+  здесь оставлены на ручное включение
+- Опции разноса слоёв на пару карт (`STRATA_SPLIT_*`) убраны: карта одна
+
+## 5. Проверено и не проверено
+
+Проверено машинно:
+- `docker compose config` для нового файла — ошибки нет, device_ids и env разворачиваются;
+- `docker build --check` — предупреждений нет, базовые образы
+  `nvidia/cuda:12.8.0-{devel,runtime}-ubuntu24.04` резолвятся;
+- `bash -n` по всем трём скриптам;
+- `llama-swap/config.yaml` парсится, запись `flash-next-strata` на 8 модель, контекст 262144.
+
+Не проверено (нужен прогон, а он требует ~68 GB трафика и остановки `flash-next-llama-server`):
+- фактическая разбивка VRAM/RAM при 262144 и реальная скорость на AVX-1;
+- сколько места занимает подготовленный пакет Strata после распаковки GGUF;
+- сборка движка на CUDA 12.8 с `-DSTRATA_EXPERIMENTAL_SM60=ON` (доки форка описывают
+  эти флаги, но на этом CPU их никто не собирал);
+- поведение `STRATA_KV_GROW=1` вместе с `LOW_RAM=off` на одной карте.
