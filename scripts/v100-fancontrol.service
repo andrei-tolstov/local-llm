@@ -1,5 +1,5 @@
 [Unit]
-Description=Tesla V100 GPU Automatic Fan Control (NCT6779 SFAN3)
+Description=Supermicro X9DAX IPMI Fan Control (Tesla V100 + Dual CPU)
 After=multi-user.target nvidia-persistenced.service
 Wants=nvidia-persistenced.service
 

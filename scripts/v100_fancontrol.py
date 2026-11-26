@@ -1,194 +1,241 @@
 #!/usr/bin/env python3
 """
-Tesla V100 (пассивная) — автоматический контроллер охлаждения (v2).
+Supermicro X9DAX-HFT — автоматический контроллер охлаждения через IPMI BMC (v3).
 
-Вентилятор запитан от мультиконтроллера Nuvoton NCT6779 (каналы pwm2 = CPU_FAN,
-pwm3 = SFAN3). На Huananzhi X79 с серверным вентилятором логика ШИМ ИНВЕРТИРОВАНА:
-255 = минимальные обороты (тишина), 0 = 100 % (максимальный обдув).
+Раздельное управление двумя ШИМ-зонами платы Supermicro X9 (Nuvoton WPCM450 BMC)
+через `ipmitool raw 0x30 0x91 0x5A 0x03 <zone> <pwm>`:
 
-Что изменено относительно v1 (замеры scripts/gpu_fan_sweep.py, 18.11.2026):
+  - Zone 0x10 (FAN1–FAN6, вентилятор Tesla V100 подключён к FAN3):
+      ИНВЕРТИРОВАННЫЙ ШИМ серверного вентилятора:
+      255 (0xFF) = стоп / минимум, 0 (0x00) = 100 % (максимальный обдув).
+      Калибровка кривой v2 от реального порога троттлинга Tesla V100 (82 °C)
+      с учётом температуры HBM2, гистерезисом и выдержкой.
 
-  1. Кривая построена от РЕАЛЬНОГО порога троттлинга. У этой карты
-     `SW Thermal Slowdown` включается при 82 °C (не 87, как в `GPU Slowdown Temp`):
-     частоты падают со 1380 до 700-900 МГц, потребление с 170 до 75 Вт.
-     v1 уходила в 80 % оборотов уже на 58 °C и в 100 % на 74 °C — это и был шум.
-     Замеренная характеристика (стационар, нагрузка 125-142 Вт):
+  - Zone 0x11 (FAN7 = CPU1, FAN8 = CPU2):
+      ПРЯМОЙ ШИМ башенных кулеров 2× Xeon E5-2696 v2:
+      0 (0x00) = минимум, 255 (0xFF) = 100 % (~1725 RPM).
+      Нижняя ступень (120 / 0x78, ~1050 RPM) держит обороты с запасом выше
+      порога Supermicro BMC `lnc` (600 RPM), исключая ложные срабатывания.
 
-       duty 64.7 % (PWM 90)  -> 53.3 °C
-       duty 52.9 % (PWM 120) -> 58.9 °C
-       duty 45.1 % (PWM 140) -> 60.0 °C
-       duty 43.1 % (PWM 145) -> 63.0 °C
-       duty 35.3 % (PWM 165) -> 67.9 °C
-       duty 33.3 % (PWM 170) -> 73.9 °C
-       duty 25.5 % (PWM 190) -> 82.1 °C + троттлинг  <- нижняя граница
+Постоянное обновление ШИМ каждые 3 с также автоматически гасит кратковременные
+всплески BMC (например, при помехе тахометра 3-pin вентилятора на FAN1).
 
-     Рабочий потолок выбран 74-78 °C: запас 4-8 °C до троттлинга и 7-11 °C до
-     предела HBM2 (85 °C).
-
-  2. Гистерезис + выдержка: убраны «качели» 90 <-> 125 на простое (слышимое
-     раскручивание/останов каждые полминуты).
-
-  3. Учитывается HBM2 (temperature.memory) с поправкой, а не только ядро.
-
-  4. Потолок по CPU: этот же вентилятор охлаждает зону CPU/VRM.
-
-  5. Отказоустойчивость: 3 неудачных опроса nvidia-smi -> 100 % обдува; старт демона
-     сразу со ступени, соответствующей текущей температуре (демон может подняться на
-     уже горячей карте); при остановке сервиса ШИМ фиксируется на FAILSAFE_PWM (53 %),
-     в BIOS SmartFan каналы возвращаются только явно (--release).
-
-Запуск: systemd (v100-fancontrol.service). Отладка: --once, --set <PWM>.
+Запуск: systemd (v100-fancontrol.service).
+Отладка: --once, --set <GPU_PWM>, --set-cpu <CPU_PWM>, --release.
 """
 
 import argparse
 import glob
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
 
-# --------------------------------------------------------------- кривая
+# --------------------------------------------------------------- IPMI зоны
+ZONE_GPU = 0x10           # FAN1–FAN6 (GPU на FAN3, инвертированный ШИМ)
+ZONE_CPU = 0x11           # FAN7 (CPU1), FAN8 (CPU2) — прямой ШИМ
+
+BMC_MODE_STANDARD = 0x00  # автоматический режим BMC
+BMC_MODE_FULL = 0x01      # ручной режим (обязателен для 0x30 0x91)
+
+# --------------------------------------------------------------- кривая GPU (инвертированная)
 # (upper_temp, pwm): первая же строка, где control_temp <= upper_temp, задаёт режим.
 # Инвертированный ШИМ: чем больше число, тем ТИШЕ. duty % = (255 - pwm) / 255.
-CURVE = [
-    (48.0, 205),   # ~19.6 % — простой, почти бесшумно
-    (54.0, 185),   # ~27.5 %
-    (60.0, 170),   # ~33.3 %
-    (65.0, 150),   # ~41.2 % — типовой инференс
-    (70.0, 140),   # ~45.1 % — плотный инференс / prefill
-    (74.0, 120),   # ~52.9 % — тяжёлая нагрузка
-    (78.0, 100),   # ~60.8 % — предельная нагрузка
-    (80.0, 60),    # ~76.5 % — близко к троттлингу
+# Калибровка на Supermicro X9DAX-HFT (FAN3, Zone 0x10) при полном TDP 250 Вт
+# (cublasHgemm FP16, ~247 Вт, порог SW Thermal Slowdown = 82 °C):
+#   PWM 60  (76.5 %) -> 73.0 °C (HBM2 68.0 °C, запас 9 °C до троттлинга)
+#   PWM 90  (64.7 %) -> 76.2 °C (HBM2 72.2 °C, запас ~6 °C до троттлинга)
+#   PWM 120 (52.9 %) -> >80 °C при 245 Вт (недостаточно для 250 Вт, но хватает для ~140 Вт)
+GPU_CURVE = [
+    (48.0, 205),   # ~19.6 % — простой (~41-44 °C), почти бесшумно
+    (55.0, 185),   # ~27.5 % — лёгкая нагрузка
+    (62.0, 165),   # ~35.3 % — умеренный инференс
+    (68.0, 140),   # ~45.1 % — плотный инференс (~130-160 Вт)
+    (72.0, 115),   # ~54.9 % — высокая нагрузка
+    (76.0, 90),    # ~64.7 % — полная нагрузка 250 Вт (~76 °C, тише чем 76.5 %)
+    (78.5, 60),    # ~76.5 % — запас при 250 Вт (осаживает до ~73 °C, 9 °C до троттлинга)
     (1e9, 0),      # 100 % — аварийный режим
 ]
 
-HYSTERESIS_C = 4.0        # на сколько должно остыть, чтобы понизить ступень
-DOWN_DELAY_S = 150        # как минимум столько держим повышенную ступень
-UP_DEBOUNCE_S = 12        # столько держим рост температуры, прежде чем разгонять
-FAILSAFE_PWM = 120        # ~53 % обдува — положение, в котором карта остаётся без демона
-HBM_OFFSET_C = -3.0       # HBM2 холоднее ядра на ~3 °C, а предел у неё выше (85 vs 82)
-CPU_SAFE_C = 70.0         # выше этой температуры CPU не даём вентилятору опуститься ниже
-CPU_SAFE_PWM = 150        # инвертированный ШИМ, не ниже которого уходим при перегреве CPU
+# --------------------------------------------------------------- кривая CPU (прямая)
+# Прямой ШИМ: чем больше число, тем БЫСТРЕЕ. Минимум 120 (~1050 RPM > lnc 600 RPM).
+CPU_CURVE = [
+    (45.0, 120),   # ~47 % (~1050 RPM) — тихий простой, безопасно выше порога lnc
+    (55.0, 145),   # ~57 % (~1200 RPM)
+    (65.0, 180),   # ~71 % (~1400 RPM)
+    (72.0, 215),   # ~84 % (~1550 RPM)
+    (1e9, 255),    # 100 % (~1725 RPM) — максимальное охлаждение CPU
+]
+
+GPU_HYSTERESIS_C = 4.0     # на сколько должно остыть GPU, чтобы понизить ступень
+GPU_DOWN_DELAY_S = 150     # минимальная выдержка повышенной ступени GPU
+GPU_UP_DEBOUNCE_S = 12     # задержка перед разгоном GPU (фильтр коротких пиков)
+HBM_OFFSET_C = -3.0        # HBM2 холоднее ядра на ~3 °C, предел выше (85 vs 82)
+
+CPU_HYSTERESIS_C = 3.0     # гистерезис для CPU
+CPU_DOWN_DELAY_S = 30      # выдержка ступени CPU
+CPU_UP_DEBOUNCE_S = 6      # задержка перед разгоном CPU
+
+FAILSAFE_GPU_PWM = 90      # ~65 % обдува GPU при остановке демона (выдерживает даже 250 Вт)
+FAILSAFE_CPU_PWM = 180     # ~71 % обдува CPU при остановке/ошибке чтения
+
 MAX_PWM = 255
-MIN_PWM = 0               # 100 % обдува в инвертированной логике
+MIN_PWM = 0
 READ_FAIL_LIMIT = 3
 PERIOD_S = 3.0
+MODE_CHECK_INTERVAL_S = 60.0
 
-GPU_INDEX = os.environ.get("GPU_INDEX", "0")
-CHANNELS = [2, 3]
-
-
-# --------------------------------------------------------------- hwmon
-
-def find_hwmon(pattern="nct"):
-    for d in glob.glob("/sys/class/hwmon/hwmon*"):
-        try:
-            with open(os.path.join(d, "name")) as f:
-                if pattern in f.read().lower():
-                    return d
-        except Exception:
-            pass
-    return None
+GPU_INDEX = os.environ.get("GPU_INDEX", "").strip()
+IPMITOOL = shutil.which("ipmitool") or "/usr/bin/ipmitool"
 
 
-NCT_DIR = find_hwmon()
-if not NCT_DIR:
-    sys.stderr.write("ERROR: NCT6779 hwmon device not found!\n")
-    sys.exit(1)
+# --------------------------------------------------------------- IPMI BMC
+
+def ipmi_raw(*hex_bytes):
+    cmd = [IPMITOOL, "raw"] + [f"0x{b:02x}" for b in hex_bytes]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip() or f"ipmitool exited {res.returncode}")
+    return res.stdout.strip()
 
 
-def set_pwm(value):
-    value = max(MIN_PWM, min(MAX_PWM, int(value)))
-    for ch in CHANNELS:
-        try:
-            with open(os.path.join(NCT_DIR, f"pwm{ch}_enable"), "w") as f:
-                f.write("1")            # 1 = manual mode
-            with open(os.path.join(NCT_DIR, f"pwm{ch}"), "w") as f:
-                f.write(str(value))
-        except Exception as e:
-            sys.stderr.write(f"Failed to set pwm{ch}: {e}\n")
-
-
-def revert_to_bios():
-    """Возврат каналов в автоматический режим BIOS (SmartFan)."""
-    for ch in CHANNELS:
-        try:
-            with open(os.path.join(NCT_DIR, f"pwm{ch}_enable"), "w") as f:
-                f.write("5")
-        except Exception:
-            set_pwm(MIN_PWM)
-
-
-def duty_pct(pwm):
-    return int((MAX_PWM - pwm) * 100 / MAX_PWM)
-
-
-# --------------------------------------------------------------- телеметрия
-
-def read_temps():
-    """(gpu_temp, mem_temp) либо None, если nvidia-smi недоступен."""
+def get_bmc_fan_mode():
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "-i", GPU_INDEX,
-             "--query-gpu=temperature.gpu,temperature.memory",
-             "--format=csv,noheader,nounits"], timeout=3).decode().strip()
-        parts = [p.strip() for p in out.splitlines()[0].split(",")]
-        gpu = float(parts[0])
-        mem = float(parts[1]) if parts[1] not in ("N/A", "") else gpu
-        return gpu, mem
+        out = ipmi_raw(0x30, 0x45, 0x00)
+        return int(out.split()[0], 16)
     except Exception:
         return None
 
 
-def read_cpu_package():
+def set_bmc_fan_mode(mode):
+    ipmi_raw(0x30, 0x45, 0x01, mode)
+
+
+def ensure_manual_mode():
+    mode = get_bmc_fan_mode()
+    if mode != BMC_MODE_FULL:
+        set_bmc_fan_mode(BMC_MODE_FULL)
+        time.sleep(0.3)
+
+
+def set_zone_pwm(zone, value):
+    val = max(MIN_PWM, min(MAX_PWM, int(value)))
+    try:
+        ipmi_raw(0x30, 0x91, 0x5A, 0x03, zone, val)
+    except Exception as e:
+        sys.stderr.write(f"Failed to set zone 0x{zone:02x} pwm={val}: {e}\n")
+
+
+def set_gpu_pwm(value):
+    set_zone_pwm(ZONE_GPU, value)
+
+
+def set_cpu_pwm(value):
+    set_zone_pwm(ZONE_CPU, value)
+
+
+def revert_to_bmc_standard():
+    """Возврат управления в автоматический режим BMC Standard (0x00)."""
+    set_bmc_fan_mode(BMC_MODE_STANDARD)
+
+
+def gpu_duty_pct(pwm):
+    return int((MAX_PWM - pwm) * 100 / MAX_PWM)
+
+
+def cpu_duty_pct(pwm):
+    return int(pwm * 100 / MAX_PWM)
+
+
+# --------------------------------------------------------------- телеметрия
+
+def read_gpu_temps():
+    """(gpu_temp, mem_temp) для Tesla V100 либо None, если nvidia-smi недоступен."""
+    try:
+        cmd = ["nvidia-smi"]
+        if GPU_INDEX:
+            cmd += ["-i", GPU_INDEX]
+        cmd += ["--query-gpu=name,temperature.gpu,temperature.memory",
+                "--format=csv,noheader,nounits"]
+        out = subprocess.check_output(cmd, timeout=3).decode().strip()
+        v100_rows = []
+        all_rows = []
+        for line in out.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            name, gpu_s, mem_s = parts[0], parts[1], parts[2]
+            try:
+                gpu = float(gpu_s)
+            except ValueError:
+                continue
+            try:
+                mem = float(mem_s) if mem_s not in ("N/A", "[N/A]", "") else gpu
+            except ValueError:
+                mem = gpu
+            all_rows.append((gpu, mem))
+            if "v100" in name.lower():
+                v100_rows.append((gpu, mem))
+        rows = v100_rows or all_rows
+        if not rows:
+            return None
+        return max(r[0] for r in rows), max(r[1] for r in rows)
+    except Exception:
+        return None
+
+
+def read_cpu_packages():
+    """Возвращает максимальную температуру среди всех сокетов CPU (Package id 0/1)."""
+    best = None
     for d in glob.glob("/sys/class/hwmon/hwmon*"):
         try:
-            if "coretemp" not in open(os.path.join(d, "name")).read():
-                continue
+            with open(os.path.join(d, "name")) as f:
+                if "coretemp" not in f.read().lower():
+                    continue
         except Exception:
             continue
-        best = None
         for lbl in glob.glob(os.path.join(d, "temp*_label")):
             try:
-                if "package" not in open(lbl).read().lower():
-                    continue
-                v = float(open(lbl.replace("_label", "_input")).read()) / 1000.0
+                with open(lbl) as f:
+                    if "package" not in f.read().lower():
+                        continue
+                with open(lbl.replace("_label", "_input")) as f:
+                    v = float(f.read().strip()) / 1000.0
                 best = v if best is None else max(best, v)
             except Exception:
                 pass
-        if best is not None:
-            return best
-    return None
+    return best
 
 
 # --------------------------------------------------------------- регулятор
 
-def band_index(temp):
-    for i, (upper, _) in enumerate(CURVE):
+def band_index(curve, temp):
+    for i, (upper, _) in enumerate(curve):
         if temp <= upper:
             return i
-    return len(CURVE) - 1
+    return len(curve) - 1
 
 
-def step(current_idx, control_t, now, held_since, rising_since):
-    """Повышение оборотов — почти сразу, понижение — только после гистерезиса
-    и выдержки. Возвращает (idx, held_since, rising_since)."""
-    want = band_index(control_t)
-    cur_pwm, want_pwm = CURVE[current_idx][1], CURVE[want][1]
+def step_band(curve, current_idx, control_t, now, held_since, rising_since,
+              hysteresis_c, down_delay_s, up_debounce_s):
+    """Универсальный ступенчатый регулятор с гистерезисом и выдержкой.
+    Индекс 0 = самая тихая ступень, чем больше индекс — тем сильнее обдув."""
+    want = band_index(curve, control_t)
 
-    if want_pwm < cur_pwm:                       # нужно больше обдува
+    if want > current_idx:                       # нужно больше обдува
         if rising_since is None:
             rising_since = now
-        if now - rising_since >= UP_DEBOUNCE_S:
+        if now - rising_since >= up_debounce_s:
             return want, now, None
         return current_idx, held_since, rising_since
 
-    if want_pwm > cur_pwm:                       # можно стать тише
+    if want < current_idx:                       # можно стать тише
         rising_since = None
-        if control_t > CURVE[current_idx][0] - HYSTERESIS_C:
+        if control_t > curve[current_idx - 1][0] - hysteresis_c:
             return current_idx, held_since, rising_since
-        if now - held_since < DOWN_DELAY_S:
+        if now - held_since < down_delay_s:
             return current_idx, held_since, rising_since
         return want, now, rising_since
 
@@ -197,89 +244,157 @@ def step(current_idx, control_t, now, held_since, rising_since):
 
 # --------------------------------------------------------------- запуск
 
+def check_ipmi_available():
+    if not os.path.exists("/dev/ipmi0"):
+        sys.stderr.write("ERROR: /dev/ipmi0 not found! Load ipmi_devintf/ipmi_si modules.\n")
+        sys.exit(1)
+    if not os.path.exists(IPMITOOL):
+        sys.stderr.write("ERROR: ipmitool not found! Install ipmitool package.\n")
+        sys.exit(1)
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--once", action="store_true", help="один замер и расчёт ступени")
-    ap.add_argument("--set", type=int, metavar="PWM", help="рукописный инвертированный ШИМ")
+    ap = argparse.ArgumentParser(
+        description="Supermicro X9DAX-HFT IPMI fan controller (GPU Zone 0x10 + CPU Zone 0x11)"
+    )
+    ap.add_argument("--once", action="store_true", help="один замер и расчёт ступеней")
+    ap.add_argument("--set", type=int, metavar="PWM",
+                    help="ручной инвертированный ШИМ для зоны GPU (0x10): 255=стоп, 0=100%%")
+    ap.add_argument("--set-cpu", type=int, metavar="PWM",
+                    help="ручной прямой ШИМ для зоны CPU (0x11): 0=мин, 255=100%%")
     ap.add_argument("--release", action="store_true",
-                    help="явно вернуть каналы в режим BIOS SmartFan (enable=5)")
+                    help="вернуть управление в автоматический режим BMC Standard (0x00)")
     args = ap.parse_args()
 
+    check_ipmi_available()
+
     if args.release:
-        revert_to_bios()
-        print("каналы переданы обратно в BIOS SmartFan (enable=5)")
+        revert_to_bmc_standard()
+        print("BMC возвращён в автоматический режим Standard (0x00)")
         return
 
-    if args.set is not None:
-        set_pwm(args.set)
-        print(f"manual pwm={args.set} (~{duty_pct(args.set)} % оборотов)")
+    if args.set is not None or args.set_cpu is not None:
+        ensure_manual_mode()
+        if args.set is not None:
+            set_gpu_pwm(args.set)
+            print(f"manual GPU zone 0x{ZONE_GPU:02x} pwm={args.set} (~{gpu_duty_pct(args.set)} % обдува)")
+        if args.set_cpu is not None:
+            set_cpu_pwm(args.set_cpu)
+            print(f"manual CPU zone 0x{ZONE_CPU:02x} pwm={args.set_cpu} (~{cpu_duty_pct(args.set_cpu)} % обдува)")
         return
 
     if args.once:
-        temps = read_temps()
+        temps = read_gpu_temps()
+        cpu_t = read_cpu_packages()
         if temps is None:
-            print("nvidia-smi недоступен")
-            return
-        control_t = max(temps[0], temps[1] + HBM_OFFSET_C)
-        idx = band_index(control_t)
-        print(f"gpu={temps[0]}C mem={temps[1]}C cpu={read_cpu_package()}C control={control_t}C "
-              f"-> pwm={CURVE[idx][1]} (~{duty_pct(CURVE[idx][1])} %)")
+            print("GPU: nvidia-smi недоступен")
+        else:
+            control_t = max(temps[0], temps[1] + HBM_OFFSET_C)
+            g_idx = band_index(GPU_CURVE, control_t)
+            g_pwm = GPU_CURVE[g_idx][1]
+            print(f"GPU: core={temps[0]:.0f}C mem={temps[1]:.0f}C control={control_t:.0f}C "
+                  f"-> zone 0x{ZONE_GPU:02x} pwm={g_pwm} (~{gpu_duty_pct(g_pwm)} % обдува, band={g_idx})")
+        if cpu_t is None:
+            print("CPU: coretemp недоступен")
+        else:
+            c_idx = band_index(CPU_CURVE, cpu_t)
+            c_pwm = CPU_CURVE[c_idx][1]
+            print(f"CPU: max_pkg={cpu_t:.0f}C "
+                  f"-> zone 0x{ZONE_CPU:02x} pwm={c_pwm} (~{cpu_duty_pct(c_pwm)} % обдува, band={c_idx})")
         return
 
-    print(f"Starting inverted fan controller on {NCT_DIR} (channels {CHANNELS})", flush=True)
-    # SIGTERM/SIGINT должны выполняться через finally, а не «молча» убивать процесс,
-    # иначе канал останется в ручном режиме на тестовой ступени.
+    print(f"Starting Supermicro X9 IPMI fan controller: "
+          f"GPU zone=0x{ZONE_GPU:02x} (inverted), CPU zone=0x{ZONE_CPU:02x} (direct)",
+          flush=True)
+
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
-    # Стартовая ступень — по фактической температуре, а не «самая тихая»: демон может
-    # стартовать на уже горячей карте (рестарт сервиса, прогрев после теста).
-    temps = read_temps()
-    if temps is None:
-        idx = len(CURVE) - 1                     # не можем измерить -> максимальный обдув
-    else:
-        idx = band_index(max(temps[0], temps[1] + HBM_OFFSET_C))
-    set_pwm(CURVE[idx][1])
-    held_since = time.time()
-    rising_since = None
-    fails = 0
+    ensure_manual_mode()
+
+    now = time.time()
+    temps = read_gpu_temps()
+    gpu_idx = (len(GPU_CURVE) - 1 if temps is None
+               else band_index(GPU_CURVE, max(temps[0], temps[1] + HBM_OFFSET_C)))
+    cpu_t = read_cpu_packages()
+    cpu_idx = (band_index(CPU_CURVE, 65.0) if cpu_t is None
+               else band_index(CPU_CURVE, cpu_t))
+
+    set_gpu_pwm(GPU_CURVE[gpu_idx][1])
+    set_cpu_pwm(CPU_CURVE[cpu_idx][1])
+
+    gpu_held_since = now
+    gpu_rising_since = None
+    cpu_held_since = now
+    cpu_rising_since = None
+    gpu_fails = 0
     last_log = 0.0
+    last_mode_check = now
 
     try:
         while True:
-            temps = read_temps()
+            now = time.time()
+
+            # Периодически проверяем, не сбросился ли режим BMC (например, после MC reset)
+            if now - last_mode_check >= MODE_CHECK_INTERVAL_S:
+                last_mode_check = now
+                try:
+                    ensure_manual_mode()
+                except Exception as e:
+                    sys.stderr.write(f"WARNING: failed to check/set BMC mode: {e}\n")
+
+            # --- GPU Zone (0x10, инвертированная) ---
+            temps = read_gpu_temps()
             if temps is None:
-                fails += 1
-                if fails >= READ_FAIL_LIMIT:
-                    set_pwm(MIN_PWM)             # 100 % обдува при отказе опроса
-                    print("WARNING: nvidia-smi недоступен, включён 100 % обдув", flush=True)
-                time.sleep(PERIOD_S)
-                continue
-            fails = 0
+                gpu_fails += 1
+                gpu_pwm = MIN_PWM if gpu_fails >= READ_FAIL_LIMIT else GPU_CURVE[gpu_idx][1]
+                if gpu_fails == READ_FAIL_LIMIT:
+                    print("WARNING: nvidia-smi недоступен, включён 100 % обдув GPU", flush=True)
+                gpu_t = mem_t = control_t = None
+            else:
+                gpu_fails = 0
+                gpu_t, mem_t = temps
+                control_t = max(gpu_t, mem_t + HBM_OFFSET_C)
+                gpu_idx, gpu_held_since, gpu_rising_since = step_band(
+                    GPU_CURVE, gpu_idx, control_t, now,
+                    gpu_held_since, gpu_rising_since,
+                    GPU_HYSTERESIS_C, GPU_DOWN_DELAY_S, GPU_UP_DEBOUNCE_S,
+                )
+                gpu_pwm = GPU_CURVE[gpu_idx][1]
 
-            gpu_t, mem_t = temps
-            control_t = max(gpu_t, mem_t + HBM_OFFSET_C)
-            idx, held_since, rising_since = step(idx, control_t, time.time(),
-                                                 held_since, rising_since)
-            pwm = CURVE[idx][1]
+            # --- CPU Zone (0x11, прямая) ---
+            cpu_t = read_cpu_packages()
+            if cpu_t is None:
+                cpu_pwm = FAILSAFE_CPU_PWM
+            else:
+                cpu_idx, cpu_held_since, cpu_rising_since = step_band(
+                    CPU_CURVE, cpu_idx, cpu_t, now,
+                    cpu_held_since, cpu_rising_since,
+                    CPU_HYSTERESIS_C, CPU_DOWN_DELAY_S, CPU_UP_DEBOUNCE_S,
+                )
+                cpu_pwm = CPU_CURVE[cpu_idx][1]
 
-            cpu_t = read_cpu_package()
-            if cpu_t is not None and cpu_t >= CPU_SAFE_C and pwm > CPU_SAFE_PWM:
-                pwm = CPU_SAFE_PWM
-            set_pwm(pwm)
+            # Применяем ШИМ на каждом цикле — гасит возможные сбросы BMC от помех тахометра
+            set_gpu_pwm(gpu_pwm)
+            set_cpu_pwm(cpu_pwm)
 
-            if time.time() - last_log > 30:
-                last_log = time.time()
-                print(f"gpu={gpu_t:.0f}C mem={mem_t:.0f}C cpu={cpu_t}C "
-                      f"control={control_t:.0f}C -> pwm={pwm} (~{duty_pct(pwm)} %) band={idx}",
+            if now - last_log >= 30.0:
+                last_log = now
+                g_str = (f"gpu={gpu_t:.0f}C mem={mem_t:.0f}C ctrl={control_t:.0f}C"
+                         if gpu_t is not None else "gpu=ERR")
+                c_str = f"cpu={cpu_t:.0f}C" if cpu_t is not None else "cpu=ERR"
+                print(f"{g_str} -> z10={gpu_pwm} (~{gpu_duty_pct(gpu_pwm)}% b{gpu_idx}) | "
+                      f"{c_str} -> z11={cpu_pwm} (~{cpu_duty_pct(cpu_pwm)}% b{cpu_idx})",
                       flush=True)
+
             time.sleep(PERIOD_S)
     finally:
-        # Передавать каналы обратно BIOS SmartFan нельзя: у платы нет датчика GPU,
-        # и вентилятор уйдёт в минимум по холодному CPU. Оставляем известную безопасную
-        # ступень (~53 %). В BIOS осознанно можно вернуться флагом --release.
-        set_pwm(FAILSAFE_PWM)
-        print(f"Exiting: ШИМ зафиксирован на {FAILSAFE_PWM} (~{duty_pct(FAILSAFE_PWM)} %)",
+        # Оставляем обе зоны на безопасных оборотах (в Standard инвертированный GPU
+        # уходит на максимум, в Full — останавливается).
+        set_gpu_pwm(FAILSAFE_GPU_PWM)
+        set_cpu_pwm(FAILSAFE_CPU_PWM)
+        print(f"Exiting: GPU z10={FAILSAFE_GPU_PWM} (~{gpu_duty_pct(FAILSAFE_GPU_PWM)}%), "
+              f"CPU z11={FAILSAFE_CPU_PWM} (~{cpu_duty_pct(FAILSAFE_CPU_PWM)}%)",
               flush=True)
 
 
